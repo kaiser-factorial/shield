@@ -1,0 +1,55 @@
+{
+  "name": "@local/shield",
+  "version": "1.0.0",
+  "description": "Prompt injection defense utilities — detect, wrap, harden, log",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "bin": {
+    "shield": "./dist/bin/shield-cli.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/src/index.js",
+      "types": "./dist/src/index.d.ts"
+    },
+    "./react": {
+      "import": "./dist/src/react.js",
+      "types": "./dist/src/react.d.ts"
+    },
+    "./shield": {
+      "import": "./dist/src/shield.js",
+      "types": "./dist/src/shield.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "logs": "node dist/bin/shield-cli.js logs",
+    "scan": "node dist/bin/shield-cli.js scan"
+  },
+  "peerDependencies": {
+    "@anthropic-ai/sdk": ">=0.20",
+    "openai": ">=4",
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "openai": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.106.0",
+    "@types/node": "^26.0.1",
+    "@types/react": "^19.2.17",
+    "openai": "^6.45.0",
+    "react": "^19.2.7",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,85 @@
+/**
+ * File-based event logger — persists ShieldEvents to ~/.shield/events.jsonl
+ * so the `shield logs` CLI can read across all apps.
+ *
+ * Falls back silently if the home dir is unwritable (e.g. in browser contexts).
+ */
+
+import { onShieldEvent, type ShieldEvent } from "./shield.js";
+
+const LOG_DIR = `${process.env.HOME ?? "~"}/.shield`;
+const LOG_FILE = `${LOG_DIR}/events.jsonl`;
+
+let initialized = false;
+let fsModule: typeof import("fs") | null = null;
+
+async function getFs(): Promise<typeof import("fs") | null> {
+  if (fsModule !== null) return fsModule;
+  try {
+    fsModule = await import("fs");
+    return fsModule;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureLogDir(): Promise<boolean> {
+  const fs = await getFs();
+  if (!fs) return false;
+  try {
+    if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function appendEvent(event: ShieldEvent): Promise<void> {
+  const fs = await getFs();
+  if (!fs) return;
+  try {
+    if (!(await ensureLogDir())) return;
+    fs.appendFileSync(LOG_FILE, JSON.stringify(event) + "\n", "utf8");
+  } catch {
+    // Never throw from a logging side-effect
+  }
+}
+
+/**
+ * Call once at app startup to wire shield events → ~/.shield/events.jsonl.
+ * Safe to call multiple times (no-ops after first call).
+ */
+export function initFileLogger(): void {
+  if (initialized) return;
+  initialized = true;
+  onShieldEvent((ev) => void appendEvent(ev));
+}
+
+export interface ReadEventsOptions {
+  limit?: number;
+  type?: ShieldEvent["type"];
+  since?: Date;
+  source?: string;
+}
+
+/** Read events from the log file, newest-last. */
+export async function readEvents(opts: ReadEventsOptions = {}): Promise<ShieldEvent[]> {
+  const fs = await getFs();
+  if (!fs) return [];
+  try {
+    if (!fs.existsSync(LOG_FILE)) return [];
+    const lines = fs.readFileSync(LOG_FILE, "utf8").trim().split("\n").filter(Boolean);
+    let events: ShieldEvent[] = lines.map((l) => JSON.parse(l) as ShieldEvent);
+
+    if (opts.type) events = events.filter((e) => e.type === opts.type);
+    if (opts.source) events = events.filter((e) => e.source.includes(opts.source!));
+    if (opts.since) events = events.filter((e) => new Date(e.timestamp) >= opts.since!);
+    if (opts.limit) events = events.slice(-opts.limit);
+
+    return events;
+  } catch {
+    return [];
+  }
+}
+
+export { LOG_FILE };
