@@ -14,7 +14,7 @@
  * (a test enforces the package.json half). Announced in startup banners and
  * heartbeat events so `shield status` can flag apps running stale copies.
  */
-export const SHIELD_VERSION = "1.1.0";
+export const SHIELD_VERSION = "1.2.0";
 
 // ── 1. DETECT ────────────────────────────────────────────────────────────────
 
@@ -205,7 +205,7 @@ export function outputLeakedCanary(output: string, canary: string): boolean {
 // ── LOGGING ──────────────────────────────────────────────────────────────────
 
 export interface ShieldEvent {
-  type: "injection_detected" | "canary_leaked" | "trigger_stripped" | "shield_started";
+  type: "injection_detected" | "canary_leaked" | "trigger_stripped" | "shield_started" | "headless_detected";
   source: string;
   detail: string;
   score?: number;

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
-EventType = Literal["injection_detected", "canary_leaked", "trigger_stripped", "shield_started"]
+EventType = Literal["injection_detected", "canary_leaked", "trigger_stripped", "shield_started", "headless_detected"]
 
 LOG_DIR = Path.home() / ".shield"
 LOG_FILE = LOG_DIR / "events.jsonl"

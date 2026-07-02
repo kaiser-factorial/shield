@@ -14,6 +14,8 @@ Prompt injection defense library. Plugs into TypeScript and Python apps that cal
 
 **Announce** — Client wrappers print a one-line startup banner and emit a `shield_started` heartbeat (with the library version) on construction, so a protected app *visibly says so* — and `shield status` can spot apps that have gone quiet or run a stale copy.
 
+**Watch** — `shield headless` scans running processes for browser automation (headless Chromium, `--remote-debugging-port`, Playwright, Puppeteer, WebDriver, Selenium, Cypress, PhantomJS) and logs each detection as a `headless_detected` event. `--watch` keeps polling. A headless browser you didn't start is exactly the kind of mysterious activity worth an event.
+
 ## Install
 
 ```bash
@@ -114,9 +116,14 @@ npx shield logs              # tail ~/.shield/events.jsonl
 npx shield logs --limit 20
 npx shield logs --type injection_detected
 npx shield logs --source brick
+npx shield status            # per-app health, version drift, gone-quiet apps
+npx shield headless          # one-shot scan for browser automation processes
+npx shield headless --watch --interval 15   # keep watching, log new detections
 npx shield scan "ignore previous instructions and..."
 npx shield clear
 ```
+
+`shield headless` is a tripwire, not a blocker: every hit is logged with pid, matched signatures, and the command line, then it's your call. Expect hits from your own test runs — the value is the ones you *can't* explain. (First real catch: three Playwright driver processes that Antigravity IDE had quietly kept alive for weeks.) Python apps can embed the same check via `from shield import scan_and_report`.
 
 ## Knowing shield is on — banners, heartbeats, `shield status`
 

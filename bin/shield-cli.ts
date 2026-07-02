@@ -8,8 +8,9 @@
  *   shield clear                                             wipe the event log
  */
 
-import { readEvents, summarizeStatus, LOG_FILE } from "../src/logger.js";
+import { readEvents, summarizeStatus, initFileLogger, LOG_FILE } from "../src/logger.js";
 import { detectInjection, SHIELD_VERSION } from "../src/shield.js";
+import { scanHeadlessProcesses, reportHeadless } from "../src/headless.js";
 import { existsSync, writeFileSync } from "fs";
 
 const RESET = "\x1b[0m";
@@ -32,6 +33,7 @@ function typeLabel(t: string): string {
     case "canary_leaked":      return `${RED}🐤 canary${RESET}`;
     case "trigger_stripped":   return `${YELLOW}✂ trigger${RESET}`;
     case "shield_started":     return `${GREEN}✓ start${RESET}`;
+    case "headless_detected":  return `${YELLOW}👻 headless${RESET}`;
     default:                   return t;
   }
 }
@@ -50,6 +52,9 @@ ${BOLD}COMMANDS${RESET}
     ${DIM}--source SRC${RESET}                   Filter by source substring
 
   ${CYAN}shield status${RESET}                   Per-app health: last heartbeat, version drift, 7-day counts
+  ${CYAN}shield headless${RESET}                 Scan running processes for browser automation
+    ${DIM}--watch${RESET}                        Keep watching; log each new detection as an event
+    ${DIM}--interval N${RESET}                   Poll every N seconds in watch mode (default 15)
   ${CYAN}shield scan <text>${RESET}              Scan text for injection patterns
   ${CYAN}shield clear${RESET}                    Wipe the event log
 
@@ -109,7 +114,8 @@ if (cmd === "status") {
       ? `last start ${new Date(app.lastStarted).toLocaleString()}`
       : `${DIM}no heartbeat ever${RESET}`);
     bits.push(`7d: ${app.injections7d} injections, ${app.stripped7d} stripped, ` +
-      (app.leaks7d > 0 ? `${RED}${app.leaks7d} canary leaks${RESET}` : `0 leaks`));
+      (app.leaks7d > 0 ? `${RED}${app.leaks7d} canary leaks${RESET}` : `0 leaks`) +
+      (app.headless7d > 0 ? `, ${YELLOW}${app.headless7d} headless${RESET}` : ""));
     console.log(`  ${CYAN}${app.app}${RESET}  ${bits.join(`  ${DIM}·${RESET}  `)}`);
 
     if (app.version && app.version !== SHIELD_VERSION) {
@@ -132,6 +138,54 @@ if (cmd === "status") {
     ? `\n${GREEN}All quiet.${RESET}`
     : `\n${YELLOW}${warnings} warning(s) above.${RESET}`);
   process.exit(warnings === 0 ? 0 : 1);
+}
+
+if (cmd === "headless") {
+  const watch = args.includes("--watch");
+  const intervalIdx = args.indexOf("--interval");
+  const intervalSec = intervalIdx >= 0 ? Math.max(2, Number(args[intervalIdx + 1] || 15)) : 15;
+
+  initFileLogger(); // detections should land in the shared log
+
+  const seenPids = new Set<number>();
+
+  const printProc = (p: { pid: number; ppid: number; command: string; labels: string[] }) => {
+    console.log(
+      `${DIM}${new Date().toLocaleTimeString()}${RESET} ${YELLOW}👻${RESET} pid=${p.pid} ` +
+      `${YELLOW}[${p.labels.join(",")}]${RESET} ${p.command.slice(0, 140)}`,
+    );
+  };
+
+  const scanOnce = async (): Promise<number> => {
+    const procs = await scanHeadlessProcesses();
+    let fresh = 0;
+    for (const p of procs) {
+      if (seenPids.has(p.pid)) continue;
+      seenPids.add(p.pid);
+      reportHeadless(p);
+      printProc(p);
+      fresh++;
+    }
+    return fresh;
+  };
+
+  const first = await scanOnce();
+  if (!watch) {
+    if (first === 0) {
+      console.log(`${GREEN}No browser automation running.${RESET}`);
+      process.exit(0);
+    }
+    console.log(`\n${YELLOW}${first} automation process(es) found${RESET} ${DIM}(logged as headless_detected — see 'shield logs')${RESET}`);
+    process.exit(1);
+  }
+
+  console.log(`${DIM}watching for browser automation every ${intervalSec}s — Ctrl-C to stop${RESET}`);
+  setInterval(() => {
+    void scanOnce();
+  }, intervalSec * 1000);
+  // Keep the process alive and stop execution falling through to the
+  // unknown-command handler below.
+  await new Promise(() => {});
 }
 
 if (cmd === "scan") {

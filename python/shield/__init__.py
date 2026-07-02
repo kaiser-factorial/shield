@@ -19,6 +19,12 @@ from .core import (
     output_leaked_canary,
     generate_canary,
 )
+from .headless import (
+    HeadlessProcess,
+    match_headless,
+    scan_headless_processes,
+    scan_and_report,
+)
 from .logger import emit_event
 from .wrappers import ShieldAnthropicClient, ShieldOpenAIClient
 
@@ -36,6 +42,10 @@ __all__ = [
     "output_leaked_canary",
     "generate_canary",
     "emit_event",
+    "HeadlessProcess",
+    "match_headless",
+    "scan_headless_processes",
+    "scan_and_report",
     "ShieldAnthropicClient",
     "ShieldOpenAIClient",
 ]

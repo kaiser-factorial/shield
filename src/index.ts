@@ -21,6 +21,16 @@ export {
   type MessageGateResult,
 } from "./shield.js";
 
+// Headless-browser / automation watch (Node.js only)
+export {
+  HEADLESS_SIGNATURES,
+  matchHeadless,
+  scanHeadlessProcesses,
+  reportHeadless,
+  type HeadlessSignature,
+  type HeadlessProcess,
+} from "./headless.js";
+
 // SDK wrappers
 export { ShieldAnthropicClient, type ShieldAnthropicOptions } from "./client-anthropic.js";
 export { ShieldOpenAIClient, type ShieldOpenAIOptions } from "./client-openai.js";

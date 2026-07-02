@@ -96,6 +96,7 @@ export interface AppStatus {
   injections7d: number;
   leaks7d: number;
   stripped7d: number;
+  headless7d: number;
 }
 
 /**
@@ -110,7 +111,7 @@ export function summarizeStatus(events: ShieldEvent[], now: Date = new Date()): 
     const app = ev.source.split(":")[0] ?? ev.source;
     let s = byApp.get(app);
     if (!s) {
-      s = { app, version: null, lastStarted: null, lastEventAt: null, injections7d: 0, leaks7d: 0, stripped7d: 0 };
+      s = { app, version: null, lastStarted: null, lastEventAt: null, injections7d: 0, leaks7d: 0, stripped7d: 0, headless7d: 0 };
       byApp.set(app, s);
     }
 
@@ -128,6 +129,7 @@ export function summarizeStatus(events: ShieldEvent[], now: Date = new Date()): 
       if (ev.type === "injection_detected") s.injections7d++;
       else if (ev.type === "canary_leaked") s.leaks7d++;
       else if (ev.type === "trigger_stripped") s.stripped7d++;
+      else if (ev.type === "headless_detected") s.headless7d++;
     }
   }
 

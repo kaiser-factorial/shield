@@ -1,9 +1,9 @@
 # shield handoff
 
-**State as of 2026-07-02:** v1.1.0. Monorepo (TS at root, Python under
+**State as of 2026-07-02:** v1.2.0. Monorepo (TS at root, Python under
 `python/`), both languages at feature parity with test suites in CI. All
-four consumer apps rebuilt against 1.1.0. The auto-sync cron is gone —
-syncing is manual and review-first, on purpose.
+four consumer apps rebuilt. The auto-sync cron is gone — syncing is
+manual and review-first, on purpose.
 
 ---
 
@@ -30,6 +30,12 @@ observability:
    `npx shield status` aggregates heartbeats per app: version drift vs the
    repo, apps gone quiet, 7-day injection/strip/leak counts. Exits
    non-zero on warnings.
+5. **HEADLESS WATCH** (v1.2.0) — `npx shield headless [--watch]` scans
+   running processes for browser automation (headless flags,
+   `--remote-debugging-port`, Playwright/Puppeteer/WebDriver/Selenium/
+   Cypress/PhantomJS) and logs `headless_detected` events. Python:
+   `scan_and_report()`. First real catch: Antigravity IDE had kept three
+   Playwright driver processes alive since mid-June.
 
 All events from every app (TS + Python) land in `~/.shield/events.jsonl`.
 
@@ -43,6 +49,7 @@ All events from every app (TS + Python) land in `~/.shield/events.jsonl`.
 | `src/client-anthropic.ts` | drop-in Anthropic wrapper (duck-typed, no SDK import) |
 | `src/client-openai.ts` | drop-in OpenAI-compatible wrapper |
 | `src/logger.ts` | JSONL file logger + `summarizeStatus` (pure, tested) |
+| `src/headless.ts` | automation-process signatures + scanner (`python/shield/headless.py` mirrors) |
 | `src/react.ts` | `ShieldProvider` / `useInjectionScan` hook |
 | `bin/shield-cli.ts` | CLI: `logs`, `status`, `scan`, `clear` |
 | `test/*.test.ts` | node:test suites (32 tests) — `npm test` |
