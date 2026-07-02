@@ -5,6 +5,12 @@
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "bin",
+    "README.md"
+  ],
   "bin": {
     "shield": "./dist/bin/shield-cli.js"
   },

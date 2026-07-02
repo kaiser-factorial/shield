@@ -18,8 +18,8 @@ Prompt injection defense library. Plugs into TypeScript and Python apps that cal
 # TypeScript
 npm install file:../shield   # or github:kaiser-factorial/shield
 
-# Python
-pip install -e ../shield-py
+# Python (lives in python/ inside this repo)
+pip install -e ../shield/python
 ```
 
 ## TypeScript usage
@@ -124,11 +124,11 @@ Both packages have zero-dependency test suites (Node's built-in runner / Python'
 # TypeScript (runs in CI on every push)
 npm test
 
-# Python
-cd ../shield-py && python3 -m unittest discover -s tests -v
+# Python (also runs in CI)
+cd python && python3 -m unittest discover -s tests -v
 ```
 
-When adding a detection pattern or changing wrapping/hardening behavior, change **both** packages and both test suites — they are kept in feature parity by hand.
+When adding a detection pattern or changing wrapping/hardening behavior, change **both** packages and both test suites — they are kept in feature parity by hand. Both live in this repo (TypeScript at the root, Python under `python/`) so one commit covers both sides.
 
 ## Event log
 

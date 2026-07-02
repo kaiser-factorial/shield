@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "shield-local"
+version = "1.0.0"
+description = "Prompt injection defense utilities — detect, wrap, harden"
+requires-python = ">=3.10"
+dependencies = []   # zero hard deps — anthropic/openai are optional
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.20"]
+openai    = ["openai>=1.0"]
+all       = ["anthropic>=0.20", "openai>=1.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["shield"]
