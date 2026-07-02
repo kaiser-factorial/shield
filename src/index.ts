@@ -5,6 +5,8 @@ export {
   wrapUntrusted,
   wrapChatHistory,
   hardenSystemPrompt,
+  securityBoilerplate,
+  generateCanary,
   outputLeakedCanary,
   gateUserMessage,
   onShieldEvent,

@@ -15,9 +15,11 @@
 
 import {
   detectInjection,
+  generateCanary,
   hardenSystemPrompt,
   outputLeakedCanary,
   emitShieldEvent,
+  securityBoilerplate,
   wrapUntrusted,
 } from "./shield.js";
 
@@ -53,6 +55,49 @@ function extractText(content: any): string {
   return String(content ?? "");
 }
 
+/**
+ * Harden a `system` param of any legal shape.
+ * - string (or absent): append boilerplate as before.
+ * - array of blocks: append the boilerplate as a NEW text block so existing
+ *   blocks — including cache_control markers — are preserved. (Previously an
+ *   array-form system prompt was silently replaced with just the boilerplate.)
+ * - anything else: pass through untouched rather than destroy it.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function hardenSystemParam(system: any): { system: any; canary: string } {
+  if (system == null || typeof system === "string") {
+    const { prompt, canary } = hardenSystemPrompt(typeof system === "string" ? system : "");
+    return { system: prompt, canary };
+  }
+  if (Array.isArray(system)) {
+    const seed = system
+      .filter((b) => b && b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text)
+      .join("\n");
+    const canary = generateCanary(seed);
+    return { system: [...system, { type: "text", text: securityBoilerplate(canary) }], canary };
+  }
+  return { system, canary: generateCanary(String(system)) };
+}
+
+/**
+ * Wrap the text of a user message while PRESERVING non-text blocks.
+ * (Previously the whole content array was flattened to a single wrapped
+ * string, destroying images and tool_result blocks.)
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wrapUserContent(content: any): any {
+  if (typeof content === "string") return wrapUntrusted(content, "user_message");
+  if (Array.isArray(content)) {
+    return content.map((b) =>
+      b && b.type === "text" && typeof b.text === "string"
+        ? { ...b, text: wrapUntrusted(b.text, "user_message") }
+        : b,
+    );
+  }
+  return content;
+}
+
 export class ShieldAnthropicClient {
   constructor(
     private readonly inner: AnthropicLike,
@@ -70,8 +115,7 @@ export class ShieldAnthropicClient {
 
   private _prepare(params: Record<string, unknown>): { prepared: Record<string, unknown>; canary: string } {
     const appLabel = this.opts.appLabel ?? "shield";
-    const base = typeof params["system"] === "string" ? params["system"] : "";
-    const { prompt: hardenedSystem, canary } = hardenSystemPrompt(base);
+    const { system: hardenedSystem, canary } = hardenSystemParam(params["system"]);
 
     const rawMessages = (params["messages"] as Array<Record<string, unknown>>) ?? [];
     const messages = rawMessages.map((m) => {
@@ -88,7 +132,7 @@ export class ShieldAnthropicClient {
         });
       }
       if (this.opts.wrapUserMessages) {
-        return { ...m, content: wrapUntrusted(text, "user_message") };
+        return { ...m, content: wrapUserContent(m["content"]) };
       }
       return m;
     });

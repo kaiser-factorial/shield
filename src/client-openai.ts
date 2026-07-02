@@ -13,9 +13,11 @@
 
 import {
   detectInjection,
+  generateCanary,
   hardenSystemPrompt,
   outputLeakedCanary,
   emitShieldEvent,
+  securityBoilerplate,
   wrapUntrusted,
 } from "./shield.js";
 
@@ -41,6 +43,47 @@ export interface ShieldOpenAIOptions {
   appLabel?: string;
 }
 
+/**
+ * Harden a system message's content of either legal shape.
+ * - string: append boilerplate as before.
+ * - array of parts: append the boilerplate as a NEW text part so existing
+ *   parts are preserved instead of being flattened into one string.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function hardenSystemContent(content: any): { content: any; canary: string } {
+  if (content == null || typeof content === "string") {
+    const { prompt, canary } = hardenSystemPrompt(typeof content === "string" ? content : "");
+    return { content: prompt, canary };
+  }
+  if (Array.isArray(content)) {
+    const seed = content
+      .filter((p) => p && p.type === "text" && typeof p.text === "string")
+      .map((p) => p.text)
+      .join("\n");
+    const canary = generateCanary(seed);
+    return { content: [...content, { type: "text", text: securityBoilerplate(canary) }], canary };
+  }
+  return { content, canary: generateCanary(String(content)) };
+}
+
+/**
+ * Wrap the text of a user message while PRESERVING non-text parts
+ * (image_url, input_audio, file, …). Previously the whole content array was
+ * flattened to a single wrapped string.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wrapUserContent(content: any): any {
+  if (typeof content === "string") return wrapUntrusted(content, "user_message");
+  if (Array.isArray(content)) {
+    return content.map((p) =>
+      p && p.type === "text" && typeof p.text === "string"
+        ? { ...p, text: wrapUntrusted(p.text, "user_message") }
+        : p,
+    );
+  }
+  return content;
+}
+
 export class ShieldOpenAIClient {
   constructor(
     private readonly inner: OpenAI,
@@ -63,8 +106,7 @@ export class ShieldOpenAIClient {
   private _prepare(params: ChatCompletionParams): { prepared: ChatCompletionParams; canary: string } {
     const appLabel = this.opts.appLabel ?? "shield";
     const sysMsg = params.messages.find((m) => m.role === "system");
-    const base = sysMsg ? messageText(sysMsg) : "";
-    const { prompt: hardenedSystem, canary } = hardenSystemPrompt(base);
+    const { content: hardenedSystem, canary } = hardenSystemContent(sysMsg?.content);
 
     const messages: ChatMessage[] = params.messages.map((m) => {
       if (m.role === "system") return { ...m, content: hardenedSystem } as ChatMessage;
@@ -81,11 +123,17 @@ export class ShieldOpenAIClient {
           });
         }
         if (this.opts.wrapUserMessages) {
-          return { ...m, content: wrapUntrusted(text, "user_message") } as ChatMessage;
+          return { ...m, content: wrapUserContent(m.content) } as ChatMessage;
         }
       }
       return m;
     });
+
+    // No system message in the request: the hardened prompt would otherwise
+    // never reach the model (and the canary would be an orphan) — prepend it.
+    if (!sysMsg) {
+      messages.unshift({ role: "system", content: hardenedSystem } as ChatMessage);
+    }
 
     return { prepared: { ...params, messages }, canary };
   }
