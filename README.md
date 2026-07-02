@@ -123,7 +123,18 @@ npx shield scan "ignore previous instructions and..."
 npx shield clear
 ```
 
-`shield headless` is a tripwire, not a blocker: every hit is logged with pid, matched signatures, and the command line, then it's your call. Expect hits from your own test runs — the value is the ones you *can't* explain. (First real catch: three Playwright driver processes that Antigravity IDE had quietly kept alive for weeks.) Python apps can embed the same check via `from shield import scan_and_report`.
+`shield headless` is a tripwire, not a blocker: every hit is logged with pid, matched signatures, and the command line, then it's your call. Expect hits from your own test runs — the value is the ones you *can't* explain. (First real catches: three Playwright drivers Antigravity IDE had kept alive for weeks, and a transient Puppeteer headless Chrome from a Vercel plugin bootstrap.) Python apps can embed the same check via `from shield import scan_and_report`.
+
+### Continuous watching + notifications (LaunchAgent)
+
+`--notify` posts a macOS notification (with sound) for each new detection. For always-on coverage, install the LaunchAgent — it survives reboots, polls every 30s, notifies, and appends to `~/.shield/headless-watch.log`:
+
+```bash
+cp launchd/com.shield.headless-watch.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.shield.headless-watch.plist
+```
+
+It's read-only monitoring (scans `ps`, writes events, executes nothing it finds) — safe to run permanently, unlike the auto-sync cron this repo removed. Uninstall with `launchctl bootout gui/$(id -u)/com.shield.headless-watch`. Note: the plist hardcodes the node and repo paths — edit if either moves.
 
 ## Knowing shield is on — banners, heartbeats, `shield status`
 

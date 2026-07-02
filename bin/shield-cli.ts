@@ -55,6 +55,7 @@ ${BOLD}COMMANDS${RESET}
   ${CYAN}shield headless${RESET}                 Scan running processes for browser automation
     ${DIM}--watch${RESET}                        Keep watching; log each new detection as an event
     ${DIM}--interval N${RESET}                   Poll every N seconds in watch mode (default 15)
+    ${DIM}--notify${RESET}                       macOS notification on each new detection
   ${CYAN}shield scan <text>${RESET}              Scan text for injection patterns
   ${CYAN}shield clear${RESET}                    Wipe the event log
 
@@ -142,12 +143,27 @@ if (cmd === "status") {
 
 if (cmd === "headless") {
   const watch = args.includes("--watch");
+  const notify = args.includes("--notify");
   const intervalIdx = args.indexOf("--interval");
   const intervalSec = intervalIdx >= 0 ? Math.max(2, Number(args[intervalIdx + 1] || 15)) : 15;
 
   initFileLogger(); // detections should land in the shared log
 
   const seenPids = new Set<number>();
+
+  const sendNotification = async (fresh: Array<{ pid: number; labels: string[] }>) => {
+    if (!notify || fresh.length === 0 || process.platform !== "darwin") return;
+    const first = fresh[0]!;
+    const msg = fresh.length === 1
+      ? `pid=${first.pid} [${first.labels.join(",")}]`
+      : `${fresh.length} new processes, e.g. pid=${first.pid} [${first.labels.join(",")}]`;
+    const clean = msg.replace(/["\\]/g, ""); // keep osascript string literal safe
+    const { execFile } = await import("child_process");
+    execFile("osascript", [
+      "-e",
+      `display notification "${clean} — details: shield logs" with title "shield" subtitle "browser automation detected" sound name "Sosumi"`,
+    ], () => { /* notification failure is never fatal */ });
+  };
 
   const printProc = (p: { pid: number; ppid: number; command: string; labels: string[] }) => {
     console.log(
@@ -158,15 +174,14 @@ if (cmd === "headless") {
 
   const scanOnce = async (): Promise<number> => {
     const procs = await scanHeadlessProcesses();
-    let fresh = 0;
-    for (const p of procs) {
-      if (seenPids.has(p.pid)) continue;
+    const fresh = procs.filter((p) => !seenPids.has(p.pid));
+    for (const p of fresh) {
       seenPids.add(p.pid);
       reportHeadless(p);
       printProc(p);
-      fresh++;
     }
-    return fresh;
+    void sendNotification(fresh);
+    return fresh.length;
   };
 
   const first = await scanOnce();

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  shield headless watch — LaunchAgent template.
+
+  Install (copies to ~/Library/LaunchAgents and starts it):
+    cp launchd/com.shield.headless-watch.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.shield.headless-watch.plist
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.shield.headless-watch
+    rm ~/Library/LaunchAgents/com.shield.headless-watch.plist
+
+  Read-only monitoring: scans `ps` output, writes events to
+  ~/.shield/events.jsonl, posts a macOS notification per new detection.
+  It executes nothing it finds and changes nothing — safe to run always.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.shield.headless-watch</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/corinakaiser/Projects/shield/dist/bin/shield-cli.js</string>
+    <string>headless</string>
+    <string>--watch</string>
+    <string>--interval</string>
+    <string>30</string>
+    <string>--notify</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/corinakaiser/.shield/headless-watch.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/corinakaiser/.shield/headless-watch.log</string>
+</dict>
+</plist>

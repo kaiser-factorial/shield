@@ -30,12 +30,17 @@ observability:
    `npx shield status` aggregates heartbeats per app: version drift vs the
    repo, apps gone quiet, 7-day injection/strip/leak counts. Exits
    non-zero on warnings.
-5. **HEADLESS WATCH** (v1.2.0) — `npx shield headless [--watch]` scans
-   running processes for browser automation (headless flags,
+5. **HEADLESS WATCH** (v1.2.x) — `npx shield headless [--watch] [--notify]`
+   scans running processes for browser automation (headless flags,
    `--remote-debugging-port`, Playwright/Puppeteer/WebDriver/Selenium/
-   Cypress/PhantomJS) and logs `headless_detected` events. Python:
-   `scan_and_report()`. First real catch: Antigravity IDE had kept three
-   Playwright driver processes alive since mid-June.
+   Cypress/PhantomJS) and logs `headless_detected` events; `--notify`
+   posts macOS notifications. A LaunchAgent
+   (`launchd/com.shield.headless-watch.plist`, installed at
+   `~/Library/LaunchAgents/`) runs it permanently every 30s. Real catches
+   on day one: Antigravity IDE had kept three Playwright drivers alive
+   since mid-June (whole IDE + an 11-day-hung agent script killed
+   2026-07-02), and a Vercel plugin bootstrap's transient Puppeteer
+   headless Chrome.
 
 All events from every app (TS + Python) land in `~/.shield/events.jsonl`.
 
