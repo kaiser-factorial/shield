@@ -156,10 +156,14 @@ All events share `~/.shield/events.jsonl` — Python and TypeScript apps write t
 
 ## Updating group-chat's vendored copy
 
-`group-chat` keeps a copy of shield in `packages/shield/` for CI. A cron job handles syncing automatically when changes are pushed to this repo. To sync manually:
+`group-chat` keeps a copy of shield in `packages/shield/` for CI. Syncing is **manual and review-first** — run it deliberately after landing shield changes:
 
 ```bash
-rsync -a ~/Projects/shield/{src,bin,package.json,tsconfig.json} \
-  ~/Projects/group-chat/packages/shield/
-cd ~/Projects/group-chat && git add packages/shield && git commit -m "sync shield" && git push
+~/Projects/shield-sync.sh          # runs tests, syncs, shows the diff, asks before commit & push
+~/Projects/shield-sync.sh --yes    # skip prompts (tests still gate everything)
 ```
+
+> Historical note: until 2026-07-02 a 30-minute cron job did this automatically —
+> pulling, building, and pushing unreviewed code. That's a supply-chain risk for a
+> security library (anything landing on origin/main executed locally and propagated
+> eyes-free), so it was removed. Don't reintroduce it.
