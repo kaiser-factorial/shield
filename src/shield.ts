@@ -56,6 +56,11 @@ const INJECTION_PATTERNS: Array<{ label: string; re: RegExp; weight: number }> =
   { label: "when-you-read-this",    re: /when\s+you\s+read\s+this/i, weight: 0.6 },
   { label: "if-you-see-this",       re: /if\s+you\s+(see|read|process)\s+this/i, weight: 0.55 },
   { label: "hidden-instruction",    re: /hidden\s+(instruction|command|directive)/i, weight: 0.7 },
+
+  // Boundary breakout — content trying to open/close shield's <untrusted_*>
+  // wrapper tags to escape the trust boundary. Scan raw text BEFORE wrapping;
+  // wrapped output contains these tags legitimately.
+  { label: "untrusted-tag-breakout", re: /[<＜]\s*\/?\s*untrusted[\w-]*/i, weight: 0.85 },
 ];
 
 export function detectInjection(text: string, threshold = 0.5): InjectionScan {
@@ -79,17 +84,43 @@ export function detectInjection(text: string, threshold = 0.5): InjectionScan {
 
 // ── 2. WRAP ──────────────────────────────────────────────────────────────────
 
+// Any attempt to open or close an untrusted_* tag inside wrapped content —
+// covers closing slashes, embedded whitespace, and the fullwidth "＜" lookalike
+// that fuzzy tag-matching models may still read as a delimiter.
+const TAG_BREAKOUT_RE = /[<＜]\s*\/?\s*untrusted[\w-]*/gi;
+
+/**
+ * Neutralize sequences that could terminate (or spoof) an <untrusted_*>
+ * boundary. The leading bracket is rewritten to "&lt;" so the text survives
+ * as visible data but can no longer function as a tag.
+ */
+export function sanitizeUntrusted(content: string): string {
+  return content.replace(TAG_BREAKOUT_RE, (m) => `&lt;${m.slice(1)}`);
+}
+
 /**
  * Wrap untrusted external content in XML-style delimiters so LLMs treat it as
  * data, not instructions.  Always pair with a hardened system prompt that
  * tells the model to ignore any instructions inside <untrusted_*> tags.
+ *
+ * Content is sanitized first: without this, untrusted text containing
+ * `</untrusted_page_title>` would close the boundary early and everything
+ * after it would sit outside the untrusted block.
  *
  * @param content   The raw untrusted string (page title, user message, transcript, etc.)
  * @param label     Semantic label, e.g. "page_title", "user_message", "transcript"
  */
 export function wrapUntrusted(content: string, label: string): string {
   const tag = `untrusted_${label.replace(/\s+/g, "_").toLowerCase()}`;
-  return `<${tag}>\n${content}\n</${tag}>`;
+  const sanitized = sanitizeUntrusted(content);
+  if (sanitized !== content) {
+    emitShieldEvent({
+      type: "trigger_stripped",
+      source: `wrap:${tag}`,
+      detail: content.slice(0, 200),
+    });
+  }
+  return `<${tag}>\n${sanitized}\n</${tag}>`;
 }
 
 /**

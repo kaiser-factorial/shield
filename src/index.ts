@@ -1,6 +1,7 @@
 // Core detection, wrapping, hardening
 export {
   detectInjection,
+  sanitizeUntrusted,
   wrapUntrusted,
   wrapChatHistory,
   hardenSystemPrompt,

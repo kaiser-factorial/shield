@@ -4,9 +4,9 @@ Prompt injection defense library. Plugs into TypeScript and Python apps that cal
 
 ## What it does
 
-**Detect** — 24 regex patterns covering role-hijacking, instruction override, jailbreaks, data exfiltration attempts, and indirect injection markers. Returns a severity score and matched patterns.
+**Detect** — 25 regex patterns covering role-hijacking, instruction override, jailbreaks, data exfiltration attempts, indirect injection markers, and untrusted-tag breakout attempts. Returns a severity score and matched patterns.
 
-**Wrap** — Tags untrusted content (web pages, file uploads, voice transcripts, search results) with `<untrusted_*>` XML boundaries so the model treats it as data, not instructions.
+**Wrap** — Tags untrusted content (web pages, file uploads, voice transcripts, search results) with `<untrusted_*>` XML boundaries so the model treats it as data, not instructions. Content is sanitized first: any embedded `</untrusted_*>` sequence that could close the boundary early (including case, whitespace, and fullwidth-bracket variants) is neutralized to `&lt;…`, and a `trigger_stripped` event is logged.
 
 **Harden** — Prepends a stable anti-injection boilerplate and embeds a canary token into the system prompt. If the canary appears in the model's output, an injection likely leaked through.
 
@@ -115,6 +115,20 @@ npx shield logs --source brick
 npx shield scan "ignore previous instructions and..."
 npx shield clear
 ```
+
+## Tests
+
+Both packages have zero-dependency test suites (Node's built-in runner / Python's `unittest`) covering the attack corpus, benign false-positive checks, tag-breakout attempts, and canary behavior:
+
+```bash
+# TypeScript (runs in CI on every push)
+npm test
+
+# Python
+cd ../shield-py && python3 -m unittest discover -s tests -v
+```
+
+When adding a detection pattern or changing wrapping/hardening behavior, change **both** packages and both test suites — they are kept in feature parity by hand.
 
 ## Event log
 
