@@ -3,10 +3,17 @@ Wrapping, hardening, and canary utilities.
 """
 from __future__ import annotations
 
+import os
 import re
 import secrets
 
+from .detect import _PATTERNS
 from .logger import emit_event
+
+# Library version — keep in sync with pyproject.toml and the TypeScript
+# SHIELD_VERSION (a test enforces the pyproject half). Announced in startup
+# banners and heartbeat events so `shield status` can flag stale apps.
+SHIELD_VERSION = "1.1.0"
 
 # Any attempt to open or close an untrusted_* tag inside wrapped content —
 # covers closing slashes, embedded whitespace, and the fullwidth "＜" lookalike
@@ -89,3 +96,31 @@ def harden_system_prompt(base: str, canary: str | None = None) -> tuple[str, str
 
 def output_leaked_canary(output: str, canary: str) -> bool:
     return canary in output
+
+
+_announced_labels: set[str] = set()
+
+
+def announce_shield(app_label: str = "shield", *, wrap_user_messages: bool = False, banner: bool = True) -> None:
+    """
+    Announce that shield is active: prints a one-line banner and emits a
+    `shield_started` heartbeat event (carrying the library version) to the
+    shared log. The SDK client wrappers call this automatically on
+    construction — call it yourself only in apps using the lower-level
+    primitives directly.
+
+    The banner builds the habit of seeing shield start; the heartbeat is what
+    lets `shield status` notice when an app has gone quiet or runs a stale
+    version. Once per process per app_label. Set SHIELD_QUIET=1 to suppress
+    the banner (the heartbeat still fires).
+    """
+    if app_label in _announced_labels:
+        return
+    _announced_labels.add(app_label)
+
+    emit_event("shield_started", source=app_label, detail=f"v{SHIELD_VERSION}")
+
+    if not banner or os.environ.get("SHIELD_QUIET"):
+        return
+    wrap = "on" if wrap_user_messages else "off"
+    print(f"[shield] v{SHIELD_VERSION} active · app={app_label} · {len(_PATTERNS)} patterns · canary armed · wrap={wrap}")

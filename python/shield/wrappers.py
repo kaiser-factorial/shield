@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any, Iterator, Optional
 
 from .core import (
+    announce_shield,
     generate_canary,
     harden_system_prompt,
     output_leaked_canary,
@@ -81,10 +82,11 @@ class ShieldAnthropicClient:
         # Use client.messages.create / client.messages.stream exactly as before
     """
 
-    def __init__(self, inner: Any, *, app_label: str = "shield", wrap_user_messages: bool = False):
+    def __init__(self, inner: Any, *, app_label: str = "shield", wrap_user_messages: bool = False, announce: bool = True):
         self._inner = inner
         self._app_label = app_label
         self._wrap = wrap_user_messages
+        announce_shield(app_label, wrap_user_messages=wrap_user_messages, banner=announce)
 
     # ── messages proxy ────────────────────────────────────────────────────────
 
@@ -175,10 +177,11 @@ class ShieldOpenAIClient:
         resp = client.chat.completions.create(model=..., messages=...)
     """
 
-    def __init__(self, inner: Any, *, app_label: str = "shield", wrap_user_messages: bool = False):
+    def __init__(self, inner: Any, *, app_label: str = "shield", wrap_user_messages: bool = False, announce: bool = True):
         self._inner = inner
         self._app_label = app_label
         self._wrap = wrap_user_messages
+        announce_shield(app_label, wrap_user_messages=wrap_user_messages, banner=announce)
 
     @property
     def chat(self) -> "_ChatProxy":

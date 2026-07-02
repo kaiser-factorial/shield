@@ -8,6 +8,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+// Suppress startup banners in test output (heartbeat events still fire).
+process.env["SHIELD_QUIET"] = "1";
+
 import { ShieldAnthropicClient } from "../src/client-anthropic.js";
 import { ShieldOpenAIClient } from "../src/client-openai.js";
 import { onShieldEvent, type ShieldEvent } from "../src/shield.js";

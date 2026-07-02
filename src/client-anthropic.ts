@@ -14,6 +14,7 @@
  */
 
 import {
+  announceShield,
   detectInjection,
   generateCanary,
   hardenSystemPrompt,
@@ -41,6 +42,9 @@ export interface ShieldAnthropicOptions {
   wrapUserMessages?: boolean;
   /** Source label for emitted events, e.g. "voicelogger" or "brick". */
   appLabel?: string;
+  /** Print the startup banner (default true). The shield_started heartbeat
+   *  event is emitted either way. */
+  announce?: boolean;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -102,7 +106,13 @@ export class ShieldAnthropicClient {
   constructor(
     private readonly inner: AnthropicLike,
     private readonly opts: ShieldAnthropicOptions = {},
-  ) {}
+  ) {
+    announceShield({
+      appLabel: opts.appLabel,
+      banner: opts.announce,
+      wrapUserMessages: opts.wrapUserMessages,
+    });
+  }
 
   get messages() {
     // eslint-disable-next-line @typescript-eslint/no-this-alias

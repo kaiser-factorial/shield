@@ -1,5 +1,9 @@
 // Core detection, wrapping, hardening
 export {
+  SHIELD_VERSION,
+  PATTERN_COUNT,
+  announceShield,
+  type AnnounceOptions,
   detectInjection,
   sanitizeUntrusted,
   wrapUntrusted,
@@ -22,4 +26,11 @@ export { ShieldAnthropicClient, type ShieldAnthropicOptions } from "./client-ant
 export { ShieldOpenAIClient, type ShieldOpenAIOptions } from "./client-openai.js";
 
 // File logger (Node.js only — no-ops in browser)
-export { initFileLogger, readEvents, LOG_FILE, type ReadEventsOptions } from "./logger.js";
+export {
+  initFileLogger,
+  readEvents,
+  summarizeStatus,
+  LOG_FILE,
+  type ReadEventsOptions,
+  type AppStatus,
+} from "./logger.js";

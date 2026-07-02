@@ -82,4 +82,56 @@ export async function readEvents(opts: ReadEventsOptions = {}): Promise<ShieldEv
   }
 }
 
+// ── STATUS ───────────────────────────────────────────────────────────────────
+
+export interface AppStatus {
+  /** App name — the part of the event source before any ":" qualifier. */
+  app: string;
+  /** Shield version from the app's most recent shield_started heartbeat. */
+  version: string | null;
+  /** Timestamp of the most recent shield_started heartbeat. */
+  lastStarted: string | null;
+  /** Timestamp of the most recent event of any type. */
+  lastEventAt: string | null;
+  injections7d: number;
+  leaks7d: number;
+  stripped7d: number;
+}
+
+/**
+ * Aggregate the shared event log into a per-app health view for `shield status`.
+ * Pure — pass `now` for deterministic tests.
+ */
+export function summarizeStatus(events: ShieldEvent[], now: Date = new Date()): AppStatus[] {
+  const weekAgo = now.getTime() - 7 * 24 * 60 * 60 * 1000;
+  const byApp = new Map<string, AppStatus>();
+
+  for (const ev of events) {
+    const app = ev.source.split(":")[0] ?? ev.source;
+    let s = byApp.get(app);
+    if (!s) {
+      s = { app, version: null, lastStarted: null, lastEventAt: null, injections7d: 0, leaks7d: 0, stripped7d: 0 };
+      byApp.set(app, s);
+    }
+
+    if (!s.lastEventAt || ev.timestamp > s.lastEventAt) s.lastEventAt = ev.timestamp;
+
+    if (ev.type === "shield_started") {
+      if (!s.lastStarted || ev.timestamp > s.lastStarted) {
+        s.lastStarted = ev.timestamp;
+        s.version = ev.detail.match(/^v(.+)$/)?.[1] ?? null;
+      }
+      continue;
+    }
+
+    if (new Date(ev.timestamp).getTime() >= weekAgo) {
+      if (ev.type === "injection_detected") s.injections7d++;
+      else if (ev.type === "canary_leaked") s.leaks7d++;
+      else if (ev.type === "trigger_stripped") s.stripped7d++;
+    }
+  }
+
+  return [...byApp.values()].sort((a, b) => a.app.localeCompare(b.app));
+}
+
 export { LOG_FILE };

@@ -12,6 +12,7 @@
  */
 
 import {
+  announceShield,
   detectInjection,
   generateCanary,
   hardenSystemPrompt,
@@ -41,6 +42,9 @@ function messageText(m: ChatMessage): string {
 export interface ShieldOpenAIOptions {
   wrapUserMessages?: boolean;
   appLabel?: string;
+  /** Print the startup banner (default true). The shield_started heartbeat
+   *  event is emitted either way. */
+  announce?: boolean;
 }
 
 /**
@@ -88,7 +92,13 @@ export class ShieldOpenAIClient {
   constructor(
     private readonly inner: OpenAI,
     private readonly opts: ShieldOpenAIOptions = {},
-  ) {}
+  ) {
+    announceShield({
+      appLabel: opts.appLabel,
+      banner: opts.announce,
+      wrapUserMessages: opts.wrapUserMessages,
+    });
+  }
 
   get chat() {
     // eslint-disable-next-line @typescript-eslint/no-this-alias

@@ -8,8 +8,8 @@
  *   shield clear                                             wipe the event log
  */
 
-import { readEvents, LOG_FILE } from "../src/logger.js";
-import { detectInjection } from "../src/shield.js";
+import { readEvents, summarizeStatus, LOG_FILE } from "../src/logger.js";
+import { detectInjection, SHIELD_VERSION } from "../src/shield.js";
 import { existsSync, writeFileSync } from "fs";
 
 const RESET = "\x1b[0m";
@@ -31,6 +31,7 @@ function typeLabel(t: string): string {
     case "injection_detected": return `${RED}⚡ inject${RESET}`;
     case "canary_leaked":      return `${RED}🐤 canary${RESET}`;
     case "trigger_stripped":   return `${YELLOW}✂ trigger${RESET}`;
+    case "shield_started":     return `${GREEN}✓ start${RESET}`;
     default:                   return t;
   }
 }
@@ -48,6 +49,7 @@ ${BOLD}COMMANDS${RESET}
     ${DIM}--type TYPE${RESET}                    Filter: injection_detected | canary_leaked | trigger_stripped
     ${DIM}--source SRC${RESET}                   Filter by source substring
 
+  ${CYAN}shield status${RESET}                   Per-app health: last heartbeat, version drift, 7-day counts
   ${CYAN}shield scan <text>${RESET}              Scan text for injection patterns
   ${CYAN}shield clear${RESET}                    Wipe the event log
 
@@ -83,6 +85,53 @@ if (cmd === "logs") {
   }
 
   process.exit(0);
+}
+
+if (cmd === "status") {
+  const events = await readEvents({});
+  const apps = summarizeStatus(events);
+
+  if (apps.length === 0) {
+    console.log(`${DIM}No events logged yet. Apps announce themselves on startup once they use`);
+    console.log(`shield v1.1+ client wrappers (or call announceShield/announce_shield).${RESET}`);
+    process.exit(0);
+  }
+
+  console.log(`${BOLD}shield status${RESET} ${DIM}(library v${SHIELD_VERSION}, log: ${LOG_FILE})${RESET}\n`);
+
+  const STALE_MS = 7 * 24 * 60 * 60 * 1000;
+  let warnings = 0;
+
+  for (const app of apps) {
+    const bits: string[] = [];
+    bits.push(app.version ? `v${app.version}` : `${DIM}version unknown${RESET}`);
+    bits.push(app.lastStarted
+      ? `last start ${new Date(app.lastStarted).toLocaleString()}`
+      : `${DIM}no heartbeat ever${RESET}`);
+    bits.push(`7d: ${app.injections7d} injections, ${app.stripped7d} stripped, ` +
+      (app.leaks7d > 0 ? `${RED}${app.leaks7d} canary leaks${RESET}` : `0 leaks`));
+    console.log(`  ${CYAN}${app.app}${RESET}  ${bits.join(`  ${DIM}·${RESET}  `)}`);
+
+    if (app.version && app.version !== SHIELD_VERSION) {
+      console.log(`    ${YELLOW}⚠ running v${app.version}, repo is at v${SHIELD_VERSION} — rebuild/reinstall this app${RESET}`);
+      warnings++;
+    }
+    if (!app.lastStarted) {
+      console.log(`    ${YELLOW}⚠ never announced — pre-v1.1 shield, or the integration isn't loading${RESET}`);
+      warnings++;
+    } else if (Date.now() - new Date(app.lastStarted).getTime() > STALE_MS) {
+      console.log(`    ${DIM}quiet: no heartbeat in over 7 days (app not run, or shield stopped loading)${RESET}`);
+    }
+    if (app.leaks7d > 0) {
+      console.log(`    ${RED}⚠ canary leaked in the last 7 days — inspect: shield logs --type canary_leaked --source ${app.app}${RESET}`);
+      warnings++;
+    }
+  }
+
+  console.log(warnings === 0
+    ? `\n${GREEN}All quiet.${RESET}`
+    : `\n${YELLOW}${warnings} warning(s) above.${RESET}`);
+  process.exit(warnings === 0 ? 0 : 1);
 }
 
 if (cmd === "scan") {

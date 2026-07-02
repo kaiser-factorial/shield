@@ -7,11 +7,14 @@ Uses fake inner clients (the wrappers are duck-typed, so no SDKs needed).
 """
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+
+os.environ.setdefault("SHIELD_QUIET", "1")  # suppress banners in test output
 
 import shield.logger as shield_logger
 from shield import ShieldAnthropicClient, ShieldOpenAIClient

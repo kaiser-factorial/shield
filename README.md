@@ -12,6 +12,8 @@ Prompt injection defense library. Plugs into TypeScript and Python apps that cal
 
 **Log** — All shield events (detections, canary leaks, blocked messages) write to `~/.shield/events.jsonl`, shared across TS and Python apps. Query with the CLI.
 
+**Announce** — Client wrappers print a one-line startup banner and emit a `shield_started` heartbeat (with the library version) on construction, so a protected app *visibly says so* — and `shield status` can spot apps that have gone quiet or run a stale copy.
+
 ## Install
 
 ```bash
@@ -115,6 +117,41 @@ npx shield logs --source brick
 npx shield scan "ignore previous instructions and..."
 npx shield clear
 ```
+
+## Knowing shield is on — banners, heartbeats, `shield status`
+
+Lesson learned the hard way (wearabLLM shipped with a broken import path for months): **a protection that fails to load looks exactly like no protection.** Shield v1.1+ closes that gap in two layers:
+
+**1. Startup banner + heartbeat (automatic).** Constructing `ShieldAnthropicClient` / `ShieldOpenAIClient` prints once per process:
+
+```
+[shield] v1.1.0 active · app=brick · 25 patterns · canary armed · wrap=off
+```
+
+…and emits a `shield_started` heartbeat event to the shared log. Apps using the lower-level primitives directly should call `announceShield({ appLabel })` / `announce_shield(app_label)` at startup. Pass `announce: false` or set `SHIELD_QUIET=1` to silence the banner — the heartbeat always fires. Get used to seeing the banner; its absence means shield didn't load.
+
+**2. Central status (`npx shield status`).** You can't rely on noticing a missing banner, so the heartbeats feed one admin view across every app:
+
+```
+shield status (library v1.1.0, log: ~/.shield/events.jsonl)
+
+  brick        v1.0.0 · last start 7/1/2026 · 7d: 1 injections, 0 stripped, 0 leaks
+    ⚠ running v1.0.0, repo is at v1.1.0 — rebuild/reinstall this app
+  voicelogger  version unknown · no heartbeat ever · 7d: 0 injections, 0 stripped, 1 canary leaks
+    ⚠ never announced — pre-v1.1 shield, or the integration isn't loading
+```
+
+Exits non-zero when there are warnings, so it can run in a cron/login hook if you want a nudge.
+
+### How updates propagate (deliberately not automatic)
+
+There is no auto-update — that was removed on purpose (see the sync section below). Instead, **drift is detected**: heartbeats carry the version each app is actually running, and `shield status` flags anything older than the repo. To update a consumer:
+
+| Consumer | How it updates |
+|---|---|
+| wearabLLM (sys.path import of `python/`) | Immediately — imports the live source on next run |
+| brick, voicelogger-cli (`file:../shield`) | `npm install` (or `npm update @local/shield`) + rebuild |
+| group-chat (vendored copy) | `~/Projects/shield-sync.sh` (test-gated, review-first) |
 
 ## Tests
 

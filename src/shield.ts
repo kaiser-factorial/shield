@@ -9,6 +9,13 @@
  *   3. HARDEN   — add anti-injection boilerplate + canary to system prompts; validate output
  */
 
+/**
+ * Library version — keep in sync with package.json and python/pyproject.toml
+ * (a test enforces the package.json half). Announced in startup banners and
+ * heartbeat events so `shield status` can flag apps running stale copies.
+ */
+export const SHIELD_VERSION = "1.1.0";
+
 // ── 1. DETECT ────────────────────────────────────────────────────────────────
 
 export interface InjectionScan {
@@ -62,6 +69,8 @@ const INJECTION_PATTERNS: Array<{ label: string; re: RegExp; weight: number }> =
   // wrapped output contains these tags legitimately.
   { label: "untrusted-tag-breakout", re: /[<＜]\s*\/?\s*untrusted[\w-]*/i, weight: 0.85 },
 ];
+
+export const PATTERN_COUNT = INJECTION_PATTERNS.length;
 
 export function detectInjection(text: string, threshold = 0.5): InjectionScan {
   const matches: string[] = [];
@@ -196,7 +205,7 @@ export function outputLeakedCanary(output: string, canary: string): boolean {
 // ── LOGGING ──────────────────────────────────────────────────────────────────
 
 export interface ShieldEvent {
-  type: "injection_detected" | "canary_leaked" | "trigger_stripped";
+  type: "injection_detected" | "canary_leaked" | "trigger_stripped" | "shield_started";
   source: string;
   detail: string;
   score?: number;
@@ -214,6 +223,49 @@ export function onShieldEvent(handler: LogHandler): void {
 export function emitShieldEvent(event: Omit<ShieldEvent, "timestamp">): void {
   const full: ShieldEvent = { ...event, timestamp: new Date().toISOString() };
   for (const h of logHandlers) h(full);
+}
+
+// ── ANNOUNCE ─────────────────────────────────────────────────────────────────
+
+export interface AnnounceOptions {
+  /** App name shown in the banner and heartbeat, e.g. "brick". */
+  appLabel?: string;
+  /** Print the console banner. The heartbeat event is emitted regardless. */
+  banner?: boolean;
+  /** Reflected in the banner so you can see the wrap setting at a glance. */
+  wrapUserMessages?: boolean;
+}
+
+const announcedLabels = new Set<string>();
+
+/**
+ * Announce that shield is active: prints a one-line banner and emits a
+ * `shield_started` heartbeat event (carrying the library version) to the
+ * shared log. The SDK client wrappers call this automatically on
+ * construction — call it yourself only in apps that use the lower-level
+ * primitives directly.
+ *
+ * The banner builds the habit of seeing shield start; the heartbeat is what
+ * lets `shield status` notice when an app has gone quiet or runs a stale
+ * version — absence can't be detected by the missing thing itself, only
+ * centrally. Once per process per appLabel. Set SHIELD_QUIET=1 to suppress
+ * the banner (the heartbeat still fires).
+ */
+export function announceShield(opts: AnnounceOptions = {}): void {
+  const label = opts.appLabel ?? "shield";
+  if (announcedLabels.has(label)) return;
+  announcedLabels.add(label);
+
+  emitShieldEvent({ type: "shield_started", source: label, detail: `v${SHIELD_VERSION}` });
+
+  const quiet =
+    typeof process !== "undefined" && Boolean(process.env && process.env["SHIELD_QUIET"]);
+  if (opts.banner === false || quiet) return;
+
+  const wrap = opts.wrapUserMessages ? "on" : "off";
+  console.log(
+    `[shield] v${SHIELD_VERSION} active · app=${label} · ${PATTERN_COUNT} patterns · canary armed · wrap=${wrap}`,
+  );
 }
 
 // ── CONVENIENCE: group-chat message gate ─────────────────────────────────────
