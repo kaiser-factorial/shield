@@ -14,6 +14,7 @@
 import {
   announceShield,
   detectInjection,
+  scanDetail,
   generateCanary,
   hardenSystemPrompt,
   outputLeakedCanary,
@@ -137,7 +138,7 @@ export class ShieldOpenAIClient {
           emitShieldEvent({
             type: "injection_detected",
             source: appLabel,
-            detail: text.slice(0, 200),
+            detail: scanDetail(text, scan),
             score: scan.score,
             patterns: scan.matches,
           });
@@ -156,7 +157,7 @@ export class ShieldOpenAIClient {
           emitShieldEvent({
             type: "injection_detected",
             source: `${appLabel}:tool_result`,
-            detail: text.slice(0, 200),
+            detail: scanDetail(text, scan),
             score: scan.score,
             patterns: scan.matches,
           });

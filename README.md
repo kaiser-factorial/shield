@@ -4,7 +4,7 @@ Prompt injection defense library. Plugs into TypeScript and Python apps that cal
 
 ## What it does
 
-**Detect** — 25 regex patterns covering role-hijacking, instruction override, jailbreaks, data exfiltration attempts, indirect injection markers, and untrusted-tag breakout attempts. Returns a severity score and matched patterns.
+**Detect** — 26 regex patterns covering role-hijacking, instruction override, jailbreaks, data exfiltration attempts, indirect injection markers, and untrusted-tag breakout attempts. Returns a severity score, matched patterns, and per-match excerpts (±60 chars of context around what actually tripped each pattern) so flagged events are triageable even when the payload is buried deep in a long page.
 
 **Wrap** — Tags untrusted content (web pages, file uploads, voice transcripts, search results) with `<untrusted_*>` XML boundaries so the model treats it as data, not instructions. Content is sanitized first: any embedded `</untrusted_*>` sequence that could close the boundary early (including case, whitespace, and fullwidth-bracket variants) is neutralized to `&lt;…`, and a `trigger_stripped` event is logged.
 
@@ -151,7 +151,7 @@ Lesson learned the hard way (wearabLLM shipped with a broken import path for mon
 **1. Startup banner + heartbeat (automatic).** Constructing `ShieldAnthropicClient` / `ShieldOpenAIClient` prints once per process:
 
 ```
-[shield] v1.1.0 active · app=brick · 25 patterns · canary armed · wrap=off
+[shield] v1.3.0 active · app=brick · 26 patterns · canary armed · wrap=off
 ```
 
 …and emits a `shield_started` heartbeat event to the shared log. Apps using the lower-level primitives directly should call `announceShield({ appLabel })` / `announce_shield(app_label)` at startup. Pass `announce: false` or set `SHIELD_QUIET=1` to silence the banner — the heartbeat always fires. Get used to seeing the banner; its absence means shield didn't load.
@@ -200,11 +200,11 @@ All events share `~/.shield/events.jsonl` — Python and TypeScript apps write t
 ```jsonc
 {
   "timestamp": "2026-06-28T16:00:00.000Z",
-  "type": "injection_detected" | "canary_leaked" | "message_blocked",
-  "source": "brick" | "group-chat" | "voicelogger" | "wearabLLM",
-  "severity": "low" | "medium" | "high",
-  "patterns": ["role_hijack", "..."],
-  "snippet": "first 120 chars of flagged text"
+  "type": "injection_detected" | "canary_leaked" | "trigger_stripped" | "shield_started" | "headless_detected",
+  "source": "brick",                    // app label; ":tool_result" qualifier when the hit came via a tool result
+  "score": 0.9,                         // 0–1 risk score (injection events)
+  "patterns": ["ignore-instructions"],  // matched pattern labels
+  "detail": "[ignore-instructions] …context around the match…"  // ±60 chars around each match, capped at 200
 }
 ```
 

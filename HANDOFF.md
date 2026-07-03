@@ -11,8 +11,14 @@ default — wrapped as `<untrusted_tool_result>` (`wrapToolResults` /
 with a `:tool_result` source qualifier. `shield logs` / `headless` strip
 terminal control chars from attacker-controlled text before printing
 (ANSI/OSC escape injection). `~/.shield` is created `0700`/`0600` and
-legacy perms are tightened on first write. Consumers need a rebuild /
-`npm install` to pick this up — `shield status` will flag the drift.
+legacy perms are tightened on first write. The DAN pattern split in two:
+`jailbreak-dan` matches all-caps `DAN` only (people named Dan no longer
+flag) and `do-anything-now` catches the spelled-out phrase in any case —
+26 patterns now. Injection events carry per-match excerpts (±60 chars of
+context around what tripped the pattern) as `detail`, instead of the
+head of the message, so deep-in-the-page hits are triageable. Consumers
+need a rebuild / `npm install` to pick this up — `shield status` will
+flag the drift.
 
 ---
 
@@ -21,7 +27,7 @@ legacy perms are tightened on first write. Consumers need a rebuild /
 Prompt-injection defense library for LLM apps. Three-layer model plus
 observability:
 
-1. **DETECT** — 25 weighted regex patterns (`detectInjection` /
+1. **DETECT** — 26 weighted regex patterns (`detectInjection` /
    `detect_injection`). A tripwire, not a gate: trivially bypassed by
    translation/encoding/rephrasing, so callers decide whether to block.
 2. **WRAP** — `wrapUntrusted` tags external content in `<untrusted_*>` XML

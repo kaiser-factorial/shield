@@ -16,6 +16,7 @@
 import {
   announceShield,
   detectInjection,
+  scanDetail,
   generateCanary,
   hardenSystemPrompt,
   outputLeakedCanary,
@@ -185,7 +186,7 @@ export class ShieldAnthropicClient {
         emitShieldEvent({
           type: "injection_detected",
           source: appLabel,
-          detail: text.slice(0, 200),
+          detail: scanDetail(text, scan),
           score: scan.score,
           patterns: scan.matches,
         });
@@ -201,7 +202,7 @@ export class ShieldAnthropicClient {
           emitShieldEvent({
             type: "injection_detected",
             source: `${appLabel}:tool_result`,
-            detail: toolText.slice(0, 200),
+            detail: scanDetail(toolText, toolScan),
             score: toolScan.score,
             patterns: toolScan.matches,
           });

@@ -28,8 +28,8 @@ test("version constant matches package.json (parity is enforced, not hoped for)"
   assert.equal(SHIELD_VERSION, pkg.version);
 });
 
-test("pattern count matches the documented 25", () => {
-  assert.equal(PATTERN_COUNT, 25);
+test("pattern count matches the documented 26", () => {
+  assert.equal(PATTERN_COUNT, 26);
 });
 
 test("announce emits a shield_started heartbeat carrying the version", () => {

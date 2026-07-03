@@ -14,7 +14,7 @@ from .core import (
     security_boilerplate,
     wrap_untrusted,
 )
-from .detect import detect_injection
+from .detect import detect_injection, scan_detail
 from .logger import emit_event
 
 
@@ -176,7 +176,7 @@ class _MessagesProxy:
                     emit_event(
                         "injection_detected",
                         source=self._label,
-                        detail=text[:200],
+                        detail=scan_detail(text, scan),
                         score=scan.score,
                         patterns=scan.matches,
                     )
@@ -191,7 +191,7 @@ class _MessagesProxy:
                         emit_event(
                             "injection_detected",
                             source=f"{self._label}:tool_result",
-                            detail=tool_text[:200],
+                            detail=scan_detail(tool_text, tool_scan),
                             score=tool_scan.score,
                             patterns=tool_scan.matches,
                         )
@@ -317,7 +317,7 @@ class _CompletionsProxy:
                 scan = detect_injection(text)
                 if scan.flagged:
                     emit_event("injection_detected", source=self._label,
-                               detail=text[:200], score=scan.score, patterns=scan.matches)
+                               detail=scan_detail(text, scan), score=scan.score, patterns=scan.matches)
                 if self._wrap:
                     m = {**m, "content": _wrap_user_content(m.get("content", ""))}
             elif m.get("role") == "tool":
@@ -329,7 +329,7 @@ class _CompletionsProxy:
                 scan = detect_injection(text)
                 if scan.flagged:
                     emit_event("injection_detected", source=f"{self._label}:tool_result",
-                               detail=text[:200], score=scan.score, patterns=scan.matches)
+                               detail=scan_detail(text, scan), score=scan.score, patterns=scan.matches)
                 if self._wrap_tools:
                     m = {**m, "content": _wrap_content_text(content, "tool_result")}
             new_messages.append(m)
