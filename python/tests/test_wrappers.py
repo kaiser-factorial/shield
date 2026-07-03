@@ -243,6 +243,49 @@ class TestOpenAIWrapper(unittest.TestCase):
         self.assertEqual(sys_msg["content"][0], parts[0])
         self.assertIn("SECURITY CONSTRAINTS", sys_msg["content"][1]["text"])
 
+    def test_second_system_message_keeps_its_own_content(self):
+        inner, captured = fake_openai()
+        client = ShieldOpenAIClient(inner)
+        client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "Participant context: Alice prefers short answers."},
+            ],
+        )
+
+        systems = [m for m in captured.params["messages"] if m["role"] == "system"]
+        self.assertEqual(len(systems), 2)
+        # First one is hardened in place…
+        self.assertTrue(systems[0]["content"].startswith("You are helpful."))
+        self.assertIn("SECURITY CONSTRAINTS", systems[0]["content"])
+        # …the second keeps exactly its own content (previously it was replaced
+        # with a copy of the hardened first message).
+        self.assertEqual(systems[1]["content"], "Participant context: Alice prefers short answers.")
+        # And no extra system message was prepended.
+        self.assertEqual(len(captured.params["messages"]), 3)
+
+    def test_developer_role_hardened_in_place(self):
+        inner, captured = fake_openai()
+        client = ShieldOpenAIClient(inner)
+        client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "developer", "content": "You are helpful."},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+
+        dev = next(m for m in captured.params["messages"] if m["role"] == "developer")
+        self.assertTrue(dev["content"].startswith("You are helpful."))
+        self.assertIn("SECURITY CONSTRAINTS", dev["content"])
+        # No duplicate system message prepended alongside it.
+        self.assertEqual(
+            [m for m in captured.params["messages"] if m["role"] == "system"], []
+        )
+        self.assertEqual(len(captured.params["messages"]), 2)
+
     def test_missing_system_message_gets_prepended(self):
         inner, captured = fake_openai()
         client = ShieldOpenAIClient(inner)

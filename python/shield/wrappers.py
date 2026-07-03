@@ -305,12 +305,20 @@ class _CompletionsProxy:
 
     def _prepare(self, kwargs: dict) -> tuple[dict, str]:
         messages = list(kwargs.get("messages", []))
-        sys_msg = next((m for m in messages if m.get("role") == "system"), None)
+        # Harden the FIRST system (or developer — the newer OpenAI equivalent)
+        # message in place; any later system messages pass through untouched.
+        # Multiple system messages are legal, and replacing them all with the
+        # hardened first one (the old behavior) silently destroyed their content.
+        sys_idx = next(
+            (i for i, m in enumerate(messages) if m.get("role") in ("system", "developer")),
+            None,
+        )
+        sys_msg = messages[sys_idx] if sys_idx is not None else None
         hardened, canary = _harden_system(sys_msg.get("content") if sys_msg else None)
 
         new_messages = []
-        for m in messages:
-            if m.get("role") == "system":
+        for i, m in enumerate(messages):
+            if i == sys_idx:
                 m = {**m, "content": hardened}
             elif m.get("role") == "user":
                 text = _extract_text(m.get("content", ""))
@@ -334,9 +342,10 @@ class _CompletionsProxy:
                     m = {**m, "content": _wrap_content_text(content, "tool_result")}
             new_messages.append(m)
 
-        # No system message in the request: the hardened prompt would otherwise
-        # never reach the model (and the canary would be an orphan) — prepend it.
-        if sys_msg is None:
+        # No system/developer message in the request: the hardened prompt
+        # would otherwise never reach the model (and the canary would be an
+        # orphan) — prepend it.
+        if sys_idx is None:
             new_messages.insert(0, {"role": "system", "content": hardened})
 
         return {**kwargs, "messages": new_messages}, canary

@@ -259,6 +259,50 @@ test("openai: array system content keeps its parts and gains a boilerplate part"
   assert.ok(sys.content[1].text.includes("SECURITY CONSTRAINTS"));
 });
 
+test("openai: second system message keeps its own content (no clobber)", async () => {
+  const { client, captured } = fakeOpenAI();
+  const shield = new ShieldOpenAIClient(client);
+  await shield.chat.completions.create({
+    model: "gpt-4o",
+    messages: [
+      { role: "system", content: "You are helpful." },
+      { role: "user", content: "hi" },
+      { role: "system", content: "Participant context: Alice prefers short answers." },
+    ],
+  } as any);
+
+  const systems = captured.params.messages.filter((m: any) => m.role === "system");
+  assert.equal(systems.length, 2);
+  // First one is hardened in place…
+  assert.ok(systems[0].content.startsWith("You are helpful."));
+  assert.ok(systems[0].content.includes("SECURITY CONSTRAINTS"));
+  // …the second keeps exactly its own content (previously it was replaced
+  // with a copy of the hardened first message).
+  assert.equal(systems[1].content, "Participant context: Alice prefers short answers.");
+  // And no extra system message was prepended.
+  assert.equal(captured.params.messages.length, 3);
+});
+
+test("openai: developer-role message is hardened in place, role preserved", async () => {
+  const { client, captured } = fakeOpenAI();
+  const shield = new ShieldOpenAIClient(client);
+  await shield.chat.completions.create({
+    model: "gpt-4o",
+    messages: [
+      { role: "developer", content: "You are helpful." },
+      { role: "user", content: "hi" },
+    ],
+  } as any);
+
+  const dev = captured.params.messages.find((m: any) => m.role === "developer");
+  assert.ok(dev, "developer message must survive with its role");
+  assert.ok(dev.content.startsWith("You are helpful."));
+  assert.ok(dev.content.includes("SECURITY CONSTRAINTS"));
+  // No duplicate system message prepended alongside it.
+  assert.equal(captured.params.messages.filter((m: any) => m.role === "system").length, 0);
+  assert.equal(captured.params.messages.length, 2);
+});
+
 test("openai: request without a system message gets one prepended", async () => {
   const { client, captured } = fakeOpenAI();
   const shield = new ShieldOpenAIClient(client);

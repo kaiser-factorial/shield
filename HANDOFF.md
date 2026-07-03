@@ -16,9 +16,12 @@ legacy perms are tightened on first write. The DAN pattern split in two:
 flag) and `do-anything-now` catches the spelled-out phrase in any case —
 26 patterns now. Injection events carry per-match excerpts (±60 chars of
 context around what tripped the pattern) as `detail`, instead of the
-head of the message, so deep-in-the-page hits are triageable. Consumers
-need a rebuild / `npm install` to pick this up — `shield status` will
-flag the drift.
+head of the message, so deep-in-the-page hits are triageable. OpenAI
+wrappers no longer clobber extra system messages (only the first
+system/developer message is hardened; later ones pass through intact)
+and `role: "developer"` is hardened in place instead of being ignored.
+Consumers need a rebuild / `npm install` to pick this up —
+`shield status` will flag the drift.
 
 ---
 

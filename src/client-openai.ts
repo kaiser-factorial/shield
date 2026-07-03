@@ -126,11 +126,18 @@ export class ShieldOpenAIClient {
 
   private _prepare(params: ChatCompletionParams): { prepared: ChatCompletionParams; canary: string } {
     const appLabel = this.opts.appLabel ?? "shield";
-    const sysMsg = params.messages.find((m) => m.role === "system");
+    // Harden the FIRST system (or developer — the newer OpenAI equivalent)
+    // message in place; any later system messages pass through untouched.
+    // Multiple system messages are legal, and replacing them all with the
+    // hardened first one (the old behavior) silently destroyed their content.
+    const sysIdx = params.messages.findIndex(
+      (m) => m.role === "system" || (m as { role?: string }).role === "developer",
+    );
+    const sysMsg = sysIdx >= 0 ? params.messages[sysIdx] : undefined;
     const { content: hardenedSystem, canary } = hardenSystemContent(sysMsg?.content);
 
-    const messages: ChatMessage[] = params.messages.map((m) => {
-      if (m.role === "system") return { ...m, content: hardenedSystem } as ChatMessage;
+    const messages: ChatMessage[] = params.messages.map((m, i) => {
+      if (i === sysIdx) return { ...m, content: hardenedSystem } as ChatMessage;
       if (m.role === "user") {
         const text = messageText(m);
         const scan = detectInjection(text);
@@ -169,9 +176,10 @@ export class ShieldOpenAIClient {
       return m;
     });
 
-    // No system message in the request: the hardened prompt would otherwise
-    // never reach the model (and the canary would be an orphan) — prepend it.
-    if (!sysMsg) {
+    // No system/developer message in the request: the hardened prompt would
+    // otherwise never reach the model (and the canary would be an orphan) —
+    // prepend it.
+    if (sysIdx < 0) {
       messages.unshift({ role: "system", content: hardenedSystem } as ChatMessage);
     }
 
