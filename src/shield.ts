@@ -14,7 +14,7 @@
  * (a test enforces the package.json half). Announced in startup banners and
  * heartbeat events so `shield status` can flag apps running stale copies.
  */
-export const SHIELD_VERSION = "1.2.1";
+export const SHIELD_VERSION = "1.3.0";
 
 // ── 1. DETECT ────────────────────────────────────────────────────────────────
 

@@ -1,9 +1,18 @@
 # shield handoff
 
-**State as of 2026-07-02:** v1.2.0. Monorepo (TS at root, Python under
-`python/`), both languages at feature parity with test suites in CI. All
-four consumer apps rebuilt. The auto-sync cron is gone — syncing is
-manual and review-first, on purpose.
+**State as of 2026-07-03:** v1.3.0. Monorepo (TS at root, Python under
+`python/`), both languages at feature parity with test suites in CI. The
+auto-sync cron is gone — syncing is manual and review-first, on purpose.
+
+**v1.3.0 (security-review fixes):** tool results (Anthropic `tool_result`
+blocks, OpenAI `role:"tool"` messages) are now always scanned and — by
+default — wrapped as `<untrusted_tool_result>` (`wrapToolResults` /
+`wrap_tool_results` to opt out of wrapping only); tool-side detections log
+with a `:tool_result` source qualifier. `shield logs` / `headless` strip
+terminal control chars from attacker-controlled text before printing
+(ANSI/OSC escape injection). `~/.shield` is created `0700`/`0600` and
+legacy perms are tightened on first write. Consumers need a rebuild /
+`npm install` to pick this up — `shield status` will flag the drift.
 
 ---
 

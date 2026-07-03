@@ -40,6 +40,7 @@ export {
   initFileLogger,
   readEvents,
   summarizeStatus,
+  sanitizeForTerminal,
   LOG_FILE,
   type ReadEventsOptions,
   type AppStatus,

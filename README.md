@@ -10,7 +10,7 @@ Prompt injection defense library. Plugs into TypeScript and Python apps that cal
 
 **Harden** — Prepends a stable anti-injection boilerplate and embeds a canary token into the system prompt. If the canary appears in the model's output, an injection likely leaked through.
 
-**Log** — All shield events (detections, canary leaks, blocked messages) write to `~/.shield/events.jsonl`, shared across TS and Python apps. Query with the CLI.
+**Log** — All shield events (detections, canary leaks, blocked messages) write to `~/.shield/events.jsonl`, shared across TS and Python apps. Query with the CLI. The log holds snippets of flagged user content, so the dir/file are created owner-only (`0700`/`0600`; older installs are tightened on first write). The CLI strips terminal control characters from logged text before printing, so a flagged payload can't smuggle ANSI escape codes into your terminal when you review events.
 
 **Announce** — Client wrappers print a one-line startup banner and emit a `shield_started` heartbeat (with the library version) on construction, so a protected app *visibly says so* — and `shield status` can spot apps that have gone quiet or run a stale copy.
 
@@ -60,6 +60,14 @@ const client = new ShieldAnthropicClient(new Anthropic(), { appLabel: 'my-app' }
 // Use exactly like the Anthropic client — detection, hardening, and canary
 // checks happen automatically on every call.
 const msg = await client.messages.create({ ... });
+
+// Tool results (fetched pages, file contents, search output) are the main
+// indirect-injection channel in agentic apps, so since v1.3 they are always
+// scanned and wrapped as <untrusted_tool_result> by default. Detections show
+// up in the log with a `:tool_result` source qualifier. Opt out of the
+// wrapping (scanning stays on) with:
+//   new ShieldAnthropicClient(inner, { wrapToolResults: false })
+// Python: ShieldAnthropicClient(inner, wrap_tool_results=False)
 ```
 
 ### Drop-in OpenAI/OpenRouter wrapper

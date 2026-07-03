@@ -8,7 +8,7 @@
  *   shield clear                                             wipe the event log
  */
 
-import { readEvents, summarizeStatus, initFileLogger, LOG_FILE } from "../src/logger.js";
+import { readEvents, summarizeStatus, initFileLogger, sanitizeForTerminal, LOG_FILE } from "../src/logger.js";
 import { detectInjection, SHIELD_VERSION } from "../src/shield.js";
 import { scanHeadlessProcesses, reportHeadless } from "../src/headless.js";
 import { existsSync, writeFileSync } from "fs";
@@ -86,8 +86,9 @@ if (cmd === "logs") {
     const ts = new Date(ev.timestamp).toLocaleString();
     const score = ev.score !== undefined ? `score=${colorScore(ev.score)} ` : "";
     const patterns = ev.patterns?.length ? `[${ev.patterns.join(",")}] ` : "";
-    console.log(`${DIM}${ts}${RESET} ${typeLabel(ev.type)} ${CYAN}${ev.source}${RESET} ${score}${patterns}`);
-    if (ev.detail) console.log(`  ${DIM}${ev.detail.slice(0, 120)}${RESET}`);
+    // detail/source echo attacker-controlled text — never print raw control chars
+    console.log(`${DIM}${ts}${RESET} ${typeLabel(ev.type)} ${CYAN}${sanitizeForTerminal(ev.source)}${RESET} ${score}${patterns}`);
+    if (ev.detail) console.log(`  ${DIM}${sanitizeForTerminal(ev.detail).slice(0, 120)}${RESET}`);
   }
 
   process.exit(0);
@@ -166,9 +167,10 @@ if (cmd === "headless") {
   };
 
   const printProc = (p: { pid: number; ppid: number; command: string; labels: string[] }) => {
+    // command lines come from `ps` — any process can name itself with escape codes
     console.log(
       `${DIM}${new Date().toLocaleTimeString()}${RESET} ${YELLOW}👻${RESET} pid=${p.pid} ` +
-      `${YELLOW}[${p.labels.join(",")}]${RESET} ${p.command.slice(0, 140)}`,
+      `${YELLOW}[${p.labels.join(",")}]${RESET} ${sanitizeForTerminal(p.command).slice(0, 140)}`,
     );
   };
 
@@ -220,7 +222,7 @@ if (cmd === "scan") {
 
 if (cmd === "clear") {
   if (existsSync(LOG_FILE)) {
-    writeFileSync(LOG_FILE, "", "utf8");
+    writeFileSync(LOG_FILE, "", { encoding: "utf8", mode: 0o600 });
     console.log(`${GREEN}Event log cleared.${RESET}`);
   } else {
     console.log(`${DIM}Nothing to clear.${RESET}`);

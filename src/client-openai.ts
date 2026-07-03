@@ -41,6 +41,11 @@ function messageText(m: ChatMessage): string {
 
 export interface ShieldOpenAIOptions {
   wrapUserMessages?: boolean;
+  /** Wrap `role: "tool"` message content in <untrusted_tool_result> tags
+   *  (default true). Tool results are machine-fetched external content — the
+   *  main indirect injection vector in agentic apps — so unlike user messages
+   *  this is on by default. Detection scanning of tool messages is always on. */
+  wrapToolResults?: boolean;
   appLabel?: string;
   /** Print the startup banner (default true). The shield_started heartbeat
    *  event is emitted either way. */
@@ -76,16 +81,21 @@ function hardenSystemContent(content: any): { content: any; canary: string } {
  * flattened to a single wrapped string.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function wrapUserContent(content: any): any {
-  if (typeof content === "string") return wrapUntrusted(content, "user_message");
+function wrapContentText(content: any, label: string): any {
+  if (typeof content === "string") return wrapUntrusted(content, label);
   if (Array.isArray(content)) {
     return content.map((p) =>
       p && p.type === "text" && typeof p.text === "string"
-        ? { ...p, text: wrapUntrusted(p.text, "user_message") }
+        ? { ...p, text: wrapUntrusted(p.text, label) }
         : p,
     );
   }
   return content;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wrapUserContent(content: any): any {
+  return wrapContentText(content, "user_message");
 }
 
 export class ShieldOpenAIClient {
@@ -134,6 +144,25 @@ export class ShieldOpenAIClient {
         }
         if (this.opts.wrapUserMessages) {
           return { ...m, content: wrapUserContent(m.content) } as ChatMessage;
+        }
+      }
+      if (m.role === "tool") {
+        // Tool results carry external content (fetched pages, files, search
+        // output) — the primary indirect-injection channel. Always scan;
+        // wrap unless explicitly disabled.
+        const text = messageText(m);
+        const scan = detectInjection(text);
+        if (scan.flagged) {
+          emitShieldEvent({
+            type: "injection_detected",
+            source: `${appLabel}:tool_result`,
+            detail: text.slice(0, 200),
+            score: scan.score,
+            patterns: scan.matches,
+          });
+        }
+        if (this.opts.wrapToolResults !== false) {
+          return { ...m, content: wrapContentText(m.content, "tool_result") } as ChatMessage;
         }
       }
       return m;
