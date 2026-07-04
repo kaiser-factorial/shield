@@ -14,7 +14,7 @@
  * (a test enforces the package.json half). Announced in startup banners and
  * heartbeat events so `shield status` can flag apps running stale copies.
  */
-export const SHIELD_VERSION = "1.3.0";
+export const SHIELD_VERSION = "1.4.0";
 
 // ── 1. DETECT ────────────────────────────────────────────────────────────────
 
@@ -234,9 +234,17 @@ export function hardenSystemPrompt(base: string, canary?: string): HardenResult 
 /**
  * Returns true if the canary appears in the model's output —
  * a strong signal the model was manipulated into leaking its context.
+ *
+ * Besides the exact token, this catches lightly obfuscated leaks ("spell it
+ * with spaces", lowercasing, decorative dashes) by comparing with all
+ * non-alphanumerics stripped, case-insensitively. It still can't catch heavy
+ * transformations (base64, translation) — absence of a leak event is not
+ * proof of safety.
  */
 export function outputLeakedCanary(output: string, canary: string): boolean {
-  return output.includes(canary);
+  if (output.includes(canary)) return true;
+  const norm = (s: string) => s.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return norm(output).includes(norm(canary));
 }
 
 // ── LOGGING ──────────────────────────────────────────────────────────────────
@@ -356,8 +364,23 @@ export function gateUserMessage(
 // anyone who knows the (often public-ish) system prompt can reproduce and then
 // deliberately avoid or spoof. Stable within a process so hardened prompts
 // stay prompt-cache-friendly and canary alerts don't churn between calls.
-const CANARY_SALT: string =
-  globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+//
+// CSPRNG only — the old Math.random() fallback produced a predictable salt,
+// and a protection that silently arms itself with a guessable secret is worse
+// than one that fails loudly (the wearabLLM lesson, secret edition). Every
+// supported runtime (Node ≥18, all evergreen browsers) has globalThis.crypto.
+function strongSalt(): string {
+  const c = globalThis.crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  if (c?.getRandomValues) {
+    const bytes = c.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  throw new Error(
+    "[shield] No cryptographically secure RNG available (crypto.randomUUID / crypto.getRandomValues) — refusing to arm a guessable canary salt.",
+  );
+}
+const CANARY_SALT: string = strongSalt();
 
 /**
  * Canary token for a given system prompt: deterministic within this process

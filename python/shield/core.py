@@ -13,7 +13,7 @@ from .logger import emit_event
 # Library version — keep in sync with pyproject.toml and the TypeScript
 # SHIELD_VERSION (a test enforces the pyproject half). Announced in startup
 # banners and heartbeat events so `shield status` can flag stale apps.
-SHIELD_VERSION = "1.3.0"
+SHIELD_VERSION = "1.4.0"
 
 # Any attempt to open or close an untrusted_* tag inside wrapped content —
 # covers closing slashes, embedded whitespace, and the fullwidth "＜" lookalike
@@ -94,8 +94,22 @@ def harden_system_prompt(base: str, canary: str | None = None) -> tuple[str, str
     return base + security_boilerplate(token), token
 
 
+_CANARY_NORM_RE = re.compile(r"[^a-z0-9]", re.I)
+
+
 def output_leaked_canary(output: str, canary: str) -> bool:
-    return canary in output
+    """
+    True if the canary appears in the model's output. Besides the exact token,
+    catches lightly obfuscated leaks ("spell it with spaces", lowercasing,
+    decorative dashes) by comparing with all non-alphanumerics stripped,
+    case-insensitively. Heavy transformations (base64, translation) still slip
+    through — absence of a leak event is not proof of safety.
+    """
+    if canary in output:
+        return True
+    def norm(s: str) -> str:
+        return _CANARY_NORM_RE.sub("", s).lower()
+    return norm(canary) in norm(output)
 
 
 _announced_labels: set[str] = set()

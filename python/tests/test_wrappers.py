@@ -217,6 +217,108 @@ class TestAnthropicWrapper(unittest.TestCase):
         self.assertEqual(after, before + 1)
 
 
+class FakeStreamManager:
+    """Mimics anthropic's MessageStreamManager: a context manager yielding a
+    stream that has accumulated a message snapshot (which leaks the canary)."""
+
+    def __init__(self, params):
+        self.params = params
+
+    def __enter__(self):
+        canary = CANARY_RE.search(self.params["system"]).group(0)
+        return SimpleNamespace(
+            current_message_snapshot=SimpleNamespace(
+                content=[SimpleNamespace(type="text", text=f"my token is {canary}")]
+            )
+        )
+
+    def __exit__(self, *exc):
+        return False
+
+
+def fake_anthropic_streaming():
+    """Fake inner client whose create(stream=True) yields raw events and whose
+    stream() returns a MessageStreamManager-alike — both leaking the canary."""
+
+    class Messages:
+        params = None
+
+        def create(self, **kwargs):
+            self.params = kwargs
+            canary = CANARY_RE.search(kwargs["system"]).group(0)
+            return iter([
+                SimpleNamespace(type="content_block_delta",
+                                delta=SimpleNamespace(type="text_delta", text="the token is ")),
+                SimpleNamespace(type="content_block_delta",
+                                delta=SimpleNamespace(type="text_delta", text=canary)),
+                SimpleNamespace(type="message_stop"),
+            ])
+
+        def stream(self, **kwargs):
+            self.params = kwargs
+            return FakeStreamManager(kwargs)
+
+    messages = Messages()
+    return SimpleNamespace(messages=messages), messages
+
+
+def _leak_count() -> int:
+    if not shield_logger.LOG_FILE.exists():
+        return 0
+    return shield_logger.LOG_FILE.read_text().count('"canary_leaked"')
+
+
+class TestAnthropicStreaming(unittest.TestCase):
+    def test_stream_is_hardened_and_canary_checked_on_exit(self):
+        inner, captured = fake_anthropic_streaming()
+        client = ShieldAnthropicClient(inner, app_label="stream-leak")
+        before = _leak_count()
+        with client.messages.stream(system="s", messages=[]) as stream:
+            self.assertIsNotNone(stream.current_message_snapshot)
+        self.assertIn("SECURITY CONSTRAINTS", captured.params["system"])
+        self.assertEqual(_leak_count(), before + 1)
+
+    def test_create_stream_true_canary_checked_when_consumed(self):
+        inner, _ = fake_anthropic_streaming()
+        client = ShieldAnthropicClient(inner, app_label="raw-stream-leak")
+        before = _leak_count()
+        tap = client.messages.create(system="s", messages=[], stream=True)
+        self.assertEqual(_leak_count(), before, "no check before consumption")
+        events = list(tap)
+        self.assertEqual(len(events), 3, "the caller sees every event")
+        self.assertEqual(_leak_count(), before + 1)
+
+
+class TestOpenAIStreaming(unittest.TestCase):
+    def test_create_stream_true_canary_checked_when_consumed(self):
+        class Completions:
+            params = None
+
+            def create(self, **kwargs):
+                self.params = kwargs
+                sys_msg = next(m for m in kwargs["messages"] if m["role"] == "system")
+                canary = CANARY_RE.search(sys_msg["content"]).group(0)
+                return iter([
+                    SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="leak: "))]),
+                    # lowercased on purpose — exercises normalized matching
+                    SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=canary.lower()))]),
+                    SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=None))]),
+                ])
+
+        completions = Completions()
+        inner = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        client = ShieldOpenAIClient(inner, app_label="oai-stream-leak")
+        before = _leak_count()
+        tap = client.chat.completions.create(
+            model="gpt-4o",
+            stream=True,
+            messages=[{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}],
+        )
+        chunks = list(tap)
+        self.assertEqual(len(chunks), 3, "the caller sees every chunk")
+        self.assertEqual(_leak_count(), before + 1)
+
+
 class TestOpenAIWrapper(unittest.TestCase):
     def test_string_system_hardened_in_place(self):
         inner, captured = fake_openai()

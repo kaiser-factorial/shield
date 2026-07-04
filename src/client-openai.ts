@@ -22,6 +22,7 @@ import {
   securityBoilerplate,
   wrapUntrusted,
 } from "./shield.js";
+import { tapEventStream } from "./stream.js";
 
 import type OpenAI from "openai";
 import type { ChatCompletion } from "openai/resources/chat/completions.js";
@@ -186,8 +187,14 @@ export class ShieldOpenAIClient {
     return { prepared: { ...params, messages }, canary };
   }
 
-  private async _create(params: ChatCompletionParams) {
+  private _checkCanaryText(outputText: string, canary: string): void {
+    if (!outputText || !outputLeakedCanary(outputText, canary)) return;
     const appLabel = this.opts.appLabel ?? "shield";
+    emitShieldEvent({ type: "canary_leaked", source: appLabel, detail: outputText.slice(0, 200) });
+    console.warn(`[shield] Canary leak detected in response from ${appLabel}`);
+  }
+
+  private async _create(params: ChatCompletionParams) {
     const { prepared, canary } = this._prepare(params);
     const response = await this.inner.chat.completions.create(prepared);
 
@@ -196,12 +203,21 @@ export class ShieldOpenAIClient {
       const outputText = completion.choices
         .map((c) => c.message?.content ?? "")
         .join("");
-      if (outputLeakedCanary(outputText, canary)) {
-        emitShieldEvent({ type: "canary_leaked", source: appLabel, detail: outputText.slice(0, 200) });
-        console.warn(`[shield] Canary leak detected in response from ${appLabel}`);
-      }
+      this._checkCanaryText(outputText, canary);
+    } else if (params.stream === true) {
+      // create({stream: true}) returns a chunk stream — tap it so the canary
+      // check runs as the caller consumes it (previously unchecked).
+      return tapEventStream(response, openaiDeltaText, (text) => this._checkCanaryText(text, canary));
     }
 
     return response;
   }
+}
+
+/** Text carried by a streamed chat-completion chunk (create({stream:true})). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function openaiDeltaText(ev: any): string {
+  const choices = ev?.choices;
+  if (!Array.isArray(choices) || choices.length === 0) return "";
+  return choices[0]?.delta?.content ?? "";
 }

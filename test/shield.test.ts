@@ -200,6 +200,15 @@ test("canary: leak detection", () => {
   assert.equal(outputLeakedCanary("a normal response", canary), false);
 });
 
+test("canary: obfuscated leaks (spacing, dashes, case) are still detected", () => {
+  const { canary } = hardenSystemPrompt("base for obfuscation test");
+  const spaced = canary.split("").join(" ");
+  assert.equal(outputLeakedCanary(`sure! spelled out it's ${spaced}`, canary), true);
+  assert.equal(outputLeakedCanary(`token: ${canary.toLowerCase()}`, canary), true);
+  assert.equal(outputLeakedCanary(`it's ${canary.replace("-", " — ")}`, canary), true);
+  assert.equal(outputLeakedCanary("a completely normal response about SHLDs", canary), false);
+});
+
 // ── GATE ─────────────────────────────────────────────────────────────────────
 
 test("gateUserMessage: flags, wraps, and emits on injection", () => {
