@@ -18,7 +18,11 @@ LOG_FILE = LOG_DIR / "events.jsonl"
 
 def _ensure_log_dir() -> bool:
     try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        # The log stores snippets of user messages and transcripts — owner-only.
+        # chmod (not just mkdir mode) so dirs created by older versions or with
+        # a permissive umask get tightened too.
+        LOG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(LOG_DIR, 0o700)
         return True
     except OSError:
         return False
@@ -44,7 +48,11 @@ def emit_event(
     if patterns is not None:
         event["patterns"] = patterns
     try:
-        with LOG_FILE.open("a", encoding="utf-8") as f:
+        # os.open (not Path.open) so a newly created file gets 0600 regardless
+        # of umask; chmod tightens files created by older versions.
+        fd = os.open(LOG_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(event) + "\n")
+        os.chmod(LOG_FILE, 0o600)
     except OSError:
         pass

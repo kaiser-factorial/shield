@@ -1,5 +1,5 @@
 """
-Prompt injection detection — same 25 patterns as the TypeScript version.
+Prompt injection detection — same 26 patterns as the TypeScript version.
 """
 from __future__ import annotations
 
@@ -13,6 +13,9 @@ class InjectionScan:
     score: float
     matches: list[str]
     flagged: bool
+    # Context around each match — what actually tripped the pattern, for
+    # triage. Each entry: {"pattern": label, "excerpt": "…text around match…"}
+    excerpts: list[dict] = field(default_factory=list)
 
 
 _PATTERNS: list[tuple[str, re.Pattern[str], float]] = [
@@ -38,7 +41,12 @@ _PATTERNS: list[tuple[str, re.Pattern[str], float]] = [
     ("system-colon",           re.compile(r"^\s*(system|admin|operator)\s*:\s+", re.I | re.M), 0.70),
     ("xml-system-tag",         re.compile(r"<(system|instructions?|prompt)\s*>", re.I), 0.75),
     # Jailbreak boilerplate
-    ("jailbreak-dan",          re.compile(r"\bDAN\b|do\s+anything\s+now", re.I), 0.85),
+    # The acronym is case-SENSITIVE on purpose: jailbreak boilerplate writes
+    # "DAN" in caps, while "Dan"/"dan" is overwhelmingly just someone's name.
+    # A mixed-case "Dan" jailbreak has to define the acronym to work, and the
+    # spelled-out phrase below stays case-insensitive to catch exactly that.
+    ("jailbreak-dan",          re.compile(r"\bDAN\b"), 0.85),
+    ("do-anything-now",        re.compile(r"do\s+anything\s+now", re.I), 0.85),
     ("jailbreak-dev-mode",     re.compile(r"developer\s+mode\s+(enabled|on|activated)", re.I), 0.85),
     ("jailbreak-no-filters",   re.compile(r"without\s+(any\s+)?(restrictions?|filters?|limitations?|safety\s+checks?)", re.I), 0.65),
     ("jailbreak-training",     re.compile(r"your\s+(training|programming|safety\s+constraints?)\s+(doesn'?t\s+apply|can\s+be\s+(ignored|overridden))", re.I), 0.80),
@@ -53,13 +61,27 @@ _PATTERNS: list[tuple[str, re.Pattern[str], float]] = [
 ]
 
 
+_EXCERPT_RADIUS = 60
+
+
+def _match_context(text: str, start: int, end: int) -> str:
+    lo = max(0, start - _EXCERPT_RADIUS)
+    hi = min(len(text), end + _EXCERPT_RADIUS)
+    pre = "…" if lo > 0 else ""
+    post = "…" if hi < len(text) else ""
+    return pre + re.sub(r"\s+", " ", text[lo:hi]).strip() + post
+
+
 def detect_injection(text: str, threshold: float = 0.5) -> InjectionScan:
     matches: list[str] = []
+    excerpts: list[dict] = []
     max_weight = 0.0
 
     for label, pattern, weight in _PATTERNS:
-        if pattern.search(text):
+        m = pattern.search(text)
+        if m:
             matches.append(label)
+            excerpts.append({"pattern": label, "excerpt": _match_context(text, m.start(), m.end())})
             if weight > max_weight:
                 max_weight = weight
 
@@ -68,4 +90,15 @@ def detect_injection(text: str, threshold: float = 0.5) -> InjectionScan:
     else:
         score = min(1.0, max_weight + (len(matches) - 1) * 0.05)
 
-    return InjectionScan(score=score, matches=matches, flagged=score >= threshold)
+    return InjectionScan(score=score, matches=matches, flagged=score >= threshold, excerpts=excerpts)
+
+
+def scan_detail(text: str, scan: InjectionScan) -> str:
+    """
+    Event detail line for a flagged scan: context around each match instead of
+    the head of the message — the first 200 chars of a long fetched page often
+    don't include the injection at all, which makes the log useless for triage.
+    """
+    if not scan.excerpts:
+        return text[:200]
+    return " | ".join(f"[{e['pattern']}] {e['excerpt']}" for e in scan.excerpts)[:200]

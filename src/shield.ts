@@ -14,9 +14,16 @@
  * (a test enforces the package.json half). Announced in startup banners and
  * heartbeat events so `shield status` can flag apps running stale copies.
  */
-export const SHIELD_VERSION = "1.2.1";
+export const SHIELD_VERSION = "1.3.0";
 
 // ── 1. DETECT ────────────────────────────────────────────────────────────────
+
+export interface InjectionExcerpt {
+  /** label of the pattern that matched */
+  pattern: string;
+  /** the matched text with ±60 chars of surrounding context (ellipsized) */
+  excerpt: string;
+}
 
 export interface InjectionScan {
   /** 0.0–1.0 composite risk score */
@@ -25,6 +32,8 @@ export interface InjectionScan {
   matches: string[];
   /** true when score >= threshold (default 0.5) */
   flagged: boolean;
+  /** context around each match — what actually tripped the pattern, for triage */
+  excerpts: InjectionExcerpt[];
 }
 
 const INJECTION_PATTERNS: Array<{ label: string; re: RegExp; weight: number }> = [
@@ -54,7 +63,12 @@ const INJECTION_PATTERNS: Array<{ label: string; re: RegExp; weight: number }> =
   { label: "xml-system-tag",        re: /<(system|instructions?|prompt)\s*>/i, weight: 0.75 },
 
   // Jailbreak boilerplate
-  { label: "jailbreak-dan",         re: /\bDAN\b|do\s+anything\s+now/i, weight: 0.85 },
+  // The acronym is case-SENSITIVE on purpose: jailbreak boilerplate writes
+  // "DAN" in caps, while "Dan"/"dan" is overwhelmingly just someone's name.
+  // A mixed-case "Dan" jailbreak has to define the acronym to work, and the
+  // spelled-out phrase below stays case-insensitive to catch exactly that.
+  { label: "jailbreak-dan",         re: /\bDAN\b/, weight: 0.85 },
+  { label: "do-anything-now",       re: /do\s+anything\s+now/i, weight: 0.85 },
   { label: "jailbreak-dev-mode",    re: /developer\s+mode\s+(enabled|on|activated)/i, weight: 0.85 },
   { label: "jailbreak-no-filters",  re: /without\s+(any\s+)?(restrictions?|filters?|limitations?|safety\s+checks?)/i, weight: 0.65 },
   { label: "jailbreak-training",    re: /your\s+(training|programming|safety\s+constraints?)\s+(doesn'?t\s+apply|can\s+be\s+(ignored|overridden))/i, weight: 0.8 },
@@ -72,13 +86,26 @@ const INJECTION_PATTERNS: Array<{ label: string; re: RegExp; weight: number }> =
 
 export const PATTERN_COUNT = INJECTION_PATTERNS.length;
 
+const EXCERPT_RADIUS = 60;
+
+function matchContext(text: string, index: number, length: number): string {
+  const start = Math.max(0, index - EXCERPT_RADIUS);
+  const end = Math.min(text.length, index + length + EXCERPT_RADIUS);
+  const pre = start > 0 ? "…" : "";
+  const post = end < text.length ? "…" : "";
+  return pre + text.slice(start, end).replace(/\s+/g, " ").trim() + post;
+}
+
 export function detectInjection(text: string, threshold = 0.5): InjectionScan {
   const matches: string[] = [];
+  const excerpts: InjectionExcerpt[] = [];
   let maxWeight = 0;
 
   for (const { label, re, weight } of INJECTION_PATTERNS) {
-    if (re.test(text)) {
+    const m = re.exec(text);
+    if (m) {
       matches.push(label);
+      excerpts.push({ pattern: label, excerpt: matchContext(text, m.index, m[0].length) });
       if (weight > maxWeight) maxWeight = weight;
     }
   }
@@ -88,7 +115,17 @@ export function detectInjection(text: string, threshold = 0.5): InjectionScan {
     ? 0
     : Math.min(1, maxWeight + (matches.length - 1) * 0.05);
 
-  return { score, matches, flagged: score >= threshold };
+  return { score, matches, flagged: score >= threshold, excerpts };
+}
+
+/**
+ * Event detail line for a flagged scan: context around each match instead of
+ * the head of the message — the first 200 chars of a long fetched page often
+ * don't include the injection at all, which makes the log useless for triage.
+ */
+export function scanDetail(text: string, scan: InjectionScan): string {
+  if (scan.excerpts.length === 0) return text.slice(0, 200);
+  return scan.excerpts.map((e) => `[${e.pattern}] ${e.excerpt}`).join(" | ").slice(0, 200);
 }
 
 // ── 2. WRAP ──────────────────────────────────────────────────────────────────
@@ -296,7 +333,7 @@ export function gateUserMessage(
     emitShieldEvent({
       type: "injection_detected",
       source,
-      detail: text.slice(0, 200),
+      detail: scanDetail(text, scan),
       score: scan.score,
       patterns: scan.matches,
     });

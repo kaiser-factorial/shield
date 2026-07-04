@@ -16,6 +16,7 @@
 import {
   announceShield,
   detectInjection,
+  scanDetail,
   generateCanary,
   hardenSystemPrompt,
   outputLeakedCanary,
@@ -40,6 +41,11 @@ export interface ShieldAnthropicOptions {
   /** Wrap user message content in <untrusted_user_message> blocks.
    *  Enable when messages contain external content (fetched pages, transcripts). */
   wrapUserMessages?: boolean;
+  /** Wrap tool_result content in <untrusted_tool_result> blocks (default true).
+   *  Tool results are machine-fetched external content — the main indirect
+   *  injection vector in agentic apps — so unlike user messages this is on
+   *  by default. Detection scanning of tool results is always on. */
+  wrapToolResults?: boolean;
   /** Source label for emitted events, e.g. "voicelogger" or "brick". */
   appLabel?: string;
   /** Print the startup banner (default true). The shield_started heartbeat
@@ -57,6 +63,50 @@ function extractText(content: any): string {
       .join(" ");
   }
   return String(content ?? "");
+}
+
+/**
+ * Text carried inside tool_result blocks of a user message. Tool results are
+ * where fetched pages, file contents, and search output enter the context —
+ * the primary indirect-injection channel — so they get their own extraction
+ * (and their own event source qualifier) instead of riding along with typed
+ * user text.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractToolResultText(content: any): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((b) => b && b.type === "tool_result")
+    .map((b) => (typeof b.content === "string" ? b.content : extractText(b.content)))
+    .filter(Boolean)
+    .join(" ");
+}
+
+/**
+ * Wrap the text inside tool_result blocks as <untrusted_tool_result> while
+ * preserving block structure (string content stays a string, image parts
+ * inside array-form content are untouched).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wrapToolResultBlocks(content: any): any {
+  if (!Array.isArray(content)) return content;
+  return content.map((b) => {
+    if (!b || b.type !== "tool_result") return b;
+    if (typeof b.content === "string") {
+      return { ...b, content: wrapUntrusted(b.content, "tool_result") };
+    }
+    if (Array.isArray(b.content)) {
+      return {
+        ...b,
+        content: b.content.map((p: { type?: string; text?: string }) =>
+          p && p.type === "text" && typeof p.text === "string"
+            ? { ...p, text: wrapUntrusted(p.text, "tool_result") }
+            : p,
+        ),
+      };
+    }
+    return b;
+  });
 }
 
 /**
@@ -136,15 +186,33 @@ export class ShieldAnthropicClient {
         emitShieldEvent({
           type: "injection_detected",
           source: appLabel,
-          detail: text.slice(0, 200),
+          detail: scanDetail(text, scan),
           score: scan.score,
           patterns: scan.matches,
         });
       }
-      if (this.opts.wrapUserMessages) {
-        return { ...m, content: wrapUserContent(m["content"]) };
+
+      // Tool results carry external content (fetched pages, files, search
+      // output) — scan them always, with a source qualifier so `shield logs`
+      // shows where the injection came in.
+      const toolText = extractToolResultText(m["content"]);
+      if (toolText) {
+        const toolScan = detectInjection(toolText);
+        if (toolScan.flagged) {
+          emitShieldEvent({
+            type: "injection_detected",
+            source: `${appLabel}:tool_result`,
+            detail: scanDetail(toolText, toolScan),
+            score: toolScan.score,
+            patterns: toolScan.matches,
+          });
+        }
       }
-      return m;
+
+      let content = m["content"];
+      if (this.opts.wrapToolResults !== false) content = wrapToolResultBlocks(content);
+      if (this.opts.wrapUserMessages) content = wrapUserContent(content);
+      return content === m["content"] ? m : { ...m, content };
     });
 
     return { prepared: { ...params, system: hardenedSystem, messages }, canary };

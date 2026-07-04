@@ -9,7 +9,7 @@ Quick start:
     # Use client.messages.create() / .stream() exactly as before.
 """
 
-from .detect import detect_injection, InjectionScan
+from .detect import detect_injection, scan_detail, InjectionScan
 from .core import (
     SHIELD_VERSION,
     announce_shield,
@@ -35,6 +35,7 @@ __all__ = [
     "__version__",
     "announce_shield",
     "detect_injection",
+    "scan_detail",
     "InjectionScan",
     "sanitize_untrusted",
     "wrap_untrusted",
