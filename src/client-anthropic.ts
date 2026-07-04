@@ -24,6 +24,7 @@ import {
   securityBoilerplate,
   wrapUntrusted,
 } from "./shield.js";
+import { tapEventStream } from "./stream.js";
 
 // Structural interface — matches the Anthropic SDK without importing it
 interface AnthropicMessages {
@@ -31,6 +32,8 @@ interface AnthropicMessages {
   create(params: any): Promise<any>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   parse?(params: any): Promise<any>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  stream?(params: any): any;
 }
 
 interface AnthropicLike {
@@ -152,6 +155,14 @@ function wrapUserContent(content: any): any {
   return content;
 }
 
+/** Text carried by a raw Anthropic stream event (create({stream:true})). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function anthropicDeltaText(ev: any): string {
+  return ev?.type === "content_block_delta" && ev.delta?.type === "text_delta"
+    ? (ev.delta.text ?? "")
+    : "";
+}
+
 export class ShieldAnthropicClient {
   constructor(
     private readonly inner: AnthropicLike,
@@ -170,7 +181,15 @@ export class ShieldAnthropicClient {
     return {
       create: (params: Record<string, unknown>) => self._create(params),
       parse: (params: Record<string, unknown>) => self._parse(params),
+      stream: (params: Record<string, unknown>) => self._stream(params),
     };
+  }
+
+  private _checkCanaryText(outputText: string, canary: string): void {
+    if (!outputText || !outputLeakedCanary(outputText, canary)) return;
+    const appLabel = this.opts.appLabel ?? "shield";
+    emitShieldEvent({ type: "canary_leaked", source: appLabel, detail: outputText.slice(0, 200) });
+    console.warn(`[shield] Canary leak detected in response from ${appLabel}`);
   }
 
   private _prepare(params: Record<string, unknown>): { prepared: Record<string, unknown>; canary: string } {
@@ -219,7 +238,6 @@ export class ShieldAnthropicClient {
   }
 
   private async _create(params: Record<string, unknown>) {
-    const appLabel = this.opts.appLabel ?? "shield";
     const { prepared, canary } = this._prepare(params);
     const response = await this.inner.messages.create(prepared);
 
@@ -228,17 +246,17 @@ export class ShieldAnthropicClient {
         .filter((b: { type: string }) => b.type === "text")
         .map((b: { type: string; text: string }) => b.text)
         .join("");
-      if (outputLeakedCanary(outputText, canary)) {
-        emitShieldEvent({ type: "canary_leaked", source: appLabel, detail: outputText.slice(0, 200) });
-        console.warn(`[shield] Canary leak detected in response from ${appLabel}`);
-      }
+      this._checkCanaryText(outputText, canary);
+    } else if (params["stream"] === true) {
+      // create({stream: true}) returns a raw event stream — tap it so the
+      // canary check runs as the caller consumes it (previously unchecked).
+      return tapEventStream(response, anthropicDeltaText, (text) => this._checkCanaryText(text, canary));
     }
 
     return response;
   }
 
   private async _parse(params: Record<string, unknown>) {
-    const appLabel = this.opts.appLabel ?? "shield";
     const { prepared, canary } = this._prepare(params);
     const parseFn = this.inner.messages.parse;
     if (!parseFn) throw new Error("This Anthropic client does not support messages.parse");
@@ -249,12 +267,32 @@ export class ShieldAnthropicClient {
         .filter((b: { type: string }) => b.type === "text")
         .map((b: { type: string; text: string }) => b.text)
         .join("");
-      if (outputLeakedCanary(outputText, canary)) {
-        emitShieldEvent({ type: "canary_leaked", source: appLabel, detail: outputText.slice(0, 200) });
-        console.warn(`[shield] Canary leak detected in response from ${appLabel}`);
-      }
+      this._checkCanaryText(outputText, canary);
     }
 
     return response;
+  }
+
+  /**
+   * Shield-aware messages.stream(): hardens/scans like create, then checks
+   * the canary on the streamed text. The SDK's MessageStream emits "text"
+   * events as the caller consumes it, so this buffers nothing extra.
+   */
+  private _stream(params: Record<string, unknown>) {
+    const { prepared, canary } = this._prepare(params);
+    const streamFn = this.inner.messages.stream;
+    if (!streamFn) throw new Error("This Anthropic client does not support messages.stream");
+    const stream = streamFn.call(this.inner.messages, prepared);
+
+    try {
+      if (stream && typeof stream.on === "function") {
+        let buf = "";
+        stream.on("text", (t: string) => { buf += t; });
+        stream.on("end", () => this._checkCanaryText(buf, canary));
+        return stream;
+      }
+    } catch { /* canary observation must never break streaming */ }
+    // Not an event emitter (unusual client): fall back to tapping iteration.
+    return tapEventStream(stream, anthropicDeltaText, (text) => this._checkCanaryText(text, canary));
   }
 }

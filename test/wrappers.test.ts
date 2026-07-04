@@ -228,6 +228,78 @@ test("anthropic: canary echoed in the response is detected", async () => {
   assert.equal(leaks[0]!.source, "leaky");
 });
 
+// ── Anthropic: streaming canary checks ───────────────────────────────────────
+
+function fakeMessageStream() {
+  const handlers: Record<string, Array<(...args: any[]) => void>> = {};
+  return {
+    on(ev: string, cb: (...args: any[]) => void) {
+      (handlers[ev] ??= []).push(cb);
+      return this;
+    },
+    emitText(t: string) { for (const cb of handlers["text"] ?? []) cb(t); },
+    end() { for (const cb of handlers["end"] ?? []) cb(); },
+  };
+}
+
+test("anthropic: messages.stream is hardened and canary-checked on end", () => {
+  let captured: any;
+  const stream = fakeMessageStream();
+  const inner = {
+    messages: {
+      create: async () => ({}),
+      stream: (params: any) => { captured = params; return stream; },
+    },
+  };
+  const shield = new ShieldAnthropicClient(inner as any, { appLabel: "stream-leak" });
+  const before = events.length;
+  const s = shield.messages.stream({ system: "s", messages: [] });
+  assert.equal(s, stream, "the SDK stream object passes through untouched");
+  assert.ok(String(captured.system).includes("SECURITY CONSTRAINTS"));
+
+  const canary = String(captured.system).match(CANARY_RE)![0];
+  stream.emitText("sure! my token is ");
+  stream.emitText(canary);
+  assert.equal(events.slice(before).filter((e) => e.type === "canary_leaked").length, 0, "no check until the stream ends");
+  stream.end();
+
+  const leaks = events.slice(before).filter((e) => e.type === "canary_leaked");
+  assert.equal(leaks.length, 1);
+  assert.equal(leaks[0]!.source, "stream-leak");
+});
+
+test("anthropic: create({stream: true}) is canary-checked as the caller consumes it", async () => {
+  const inner = {
+    messages: {
+      create: async (params: any) => {
+        const canary = String(params.system).match(CANARY_RE)![0];
+        const evs = [
+          { type: "content_block_delta", delta: { type: "text_delta", text: "the token is " } },
+          { type: "content_block_delta", delta: { type: "text_delta", text: canary } },
+          { type: "message_stop" },
+        ];
+        return {
+          async *[Symbol.asyncIterator]() { for (const e of evs) yield e; },
+          otherMember: "intact",
+        };
+      },
+    },
+  };
+  const shield = new ShieldAnthropicClient(inner as any, { appLabel: "raw-stream-leak" });
+  const before = events.length;
+  const stream: any = await shield.messages.create({ system: "s", messages: [], stream: true });
+  assert.equal(stream.otherMember, "intact", "other stream members untouched");
+  assert.equal(events.slice(before).filter((e) => e.type === "canary_leaked").length, 0, "no check before consumption");
+
+  const seen: any[] = [];
+  for await (const ev of stream) seen.push(ev);
+  assert.equal(seen.length, 3, "the caller sees every event");
+
+  const leaks = events.slice(before).filter((e) => e.type === "canary_leaked");
+  assert.equal(leaks.length, 1);
+  assert.equal(leaks[0]!.source, "raw-stream-leak");
+});
+
 // ── OpenAI ───────────────────────────────────────────────────────────────────
 
 test("openai: string system message is hardened in place", async () => {
@@ -363,6 +435,40 @@ test("openai: wrapToolResults: false leaves tool messages untouched", async () =
     messages: [{ role: "system", content: "s" }, tool],
   } as any);
   assert.deepEqual(captured.params.messages.find((m: any) => m.role === "tool"), tool);
+});
+
+test("openai: create({stream: true}) is canary-checked as chunks are consumed (even lowercased)", async () => {
+  const client = {
+    chat: {
+      completions: {
+        create: async (params: any) => {
+          const sys = params.messages.find((m: any) => m.role === "system");
+          const canary = String(sys.content).match(CANARY_RE)![0];
+          const chunks = [
+            { choices: [{ delta: { content: "leak: " } }] },
+            { choices: [{ delta: { content: canary.toLowerCase() } }] }, // exercises normalized matching
+            { choices: [{ delta: {} }] },
+          ];
+          return { async *[Symbol.asyncIterator]() { for (const c of chunks) yield c; } };
+        },
+      },
+    },
+  } as unknown as OpenAI;
+  const shield = new ShieldOpenAIClient(client, { appLabel: "oai-stream-leak" });
+  const before = events.length;
+  const stream: any = await shield.chat.completions.create({
+    model: "gpt-4o",
+    stream: true,
+    messages: [{ role: "system", content: "s" }, { role: "user", content: "hi" }],
+  } as any);
+
+  const seen: any[] = [];
+  for await (const c of stream) seen.push(c);
+  assert.equal(seen.length, 3, "the caller sees every chunk");
+
+  const leaks = events.slice(before).filter((e) => e.type === "canary_leaked");
+  assert.equal(leaks.length, 1);
+  assert.equal(leaks[0]!.source, "oai-stream-leak");
 });
 
 test("openai: canary echoed in the response is detected", async () => {

@@ -16,11 +16,13 @@ import {
   outputLeakedCanary,
   gateUserMessage,
   onShieldEvent,
+  offShieldEvent,
+  emitShieldEvent,
   type ShieldEvent,
 } from "../src/shield.js";
 
-// Single collector for all emitted events — handlers can't be unregistered,
-// so tests snapshot `events.length` before acting and inspect the tail.
+// Single long-lived collector for all emitted events — tests snapshot
+// `events.length` before acting and inspect the tail.
 const events: ShieldEvent[] = [];
 onShieldEvent((ev) => events.push(ev));
 
@@ -198,6 +200,48 @@ test("canary: leak detection", () => {
   const { canary } = hardenSystemPrompt("base");
   assert.equal(outputLeakedCanary(`the token is ${canary}, oops`, canary), true);
   assert.equal(outputLeakedCanary("a normal response", canary), false);
+});
+
+test("canary: obfuscated leaks (spacing, dashes, case) are still detected", () => {
+  const { canary } = hardenSystemPrompt("base for obfuscation test");
+  const spaced = canary.split("").join(" ");
+  assert.equal(outputLeakedCanary(`sure! spelled out it's ${spaced}`, canary), true);
+  assert.equal(outputLeakedCanary(`token: ${canary.toLowerCase()}`, canary), true);
+  assert.equal(outputLeakedCanary(`it's ${canary.replace("-", " — ")}`, canary), true);
+  assert.equal(outputLeakedCanary("a completely normal response about SHLDs", canary), false);
+});
+
+// ── EVENT BUS ────────────────────────────────────────────────────────────────
+
+test("onShieldEvent: unsubscribing stops delivery (no handler leak on remount)", () => {
+  const seen: ShieldEvent[] = [];
+  const unsubscribe = onShieldEvent((ev) => seen.push(ev));
+
+  emitShieldEvent({ type: "shield_started", source: "bus-test", detail: "v" });
+  assert.equal(seen.length, 1);
+
+  unsubscribe();
+  emitShieldEvent({ type: "shield_started", source: "bus-test-2", detail: "v" });
+  assert.equal(seen.length, 1, "unsubscribed handler must not receive events");
+
+  unsubscribe(); // double-unsubscribe is a no-op, not an error
+});
+
+test("offShieldEvent: removes only the given handler; unknown handler is a no-op", () => {
+  const a: ShieldEvent[] = [];
+  const b: ShieldEvent[] = [];
+  const handlerA = (ev: ShieldEvent) => a.push(ev);
+  const handlerB = (ev: ShieldEvent) => b.push(ev);
+  onShieldEvent(handlerA);
+  onShieldEvent(handlerB);
+
+  offShieldEvent(handlerA);
+  offShieldEvent(() => {}); // never registered — must not throw or remove others
+  emitShieldEvent({ type: "shield_started", source: "bus-test-3", detail: "v" });
+
+  assert.equal(a.length, 0);
+  assert.equal(b.length, 1, "remaining handler still receives events");
+  offShieldEvent(handlerB);
 });
 
 // ── GATE ─────────────────────────────────────────────────────────────────────

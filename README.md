@@ -8,7 +8,7 @@ Prompt injection defense library. Plugs into TypeScript and Python apps that cal
 
 **Wrap** — Tags untrusted content (web pages, file uploads, voice transcripts, search results) with `<untrusted_*>` XML boundaries so the model treats it as data, not instructions. Content is sanitized first: any embedded `</untrusted_*>` sequence that could close the boundary early (including case, whitespace, and fullwidth-bracket variants) is neutralized to `&lt;…`, and a `trigger_stripped` event is logged.
 
-**Harden** — Prepends a stable anti-injection boilerplate and embeds a canary token into the system prompt. If the canary appears in the model's output, an injection likely leaked through.
+**Harden** — Prepends a stable anti-injection boilerplate and embeds a canary token into the system prompt. If the canary appears in the model's output, an injection likely leaked through. The leak check also catches lightly obfuscated echoes (spacing, dashes, case changes) and — via the client wrappers — runs on **streaming** responses too, as the stream is consumed. The per-process canary salt requires a CSPRNG (`crypto.randomUUID`/`getRandomValues` in TS, `secrets` in Python); shield fails loudly rather than arming a guessable canary. Absence of a leak event is not proof of safety — heavy transformations (base64, translation) still slip through.
 
 **Log** — All shield events (detections, canary leaks, blocked messages) write to `~/.shield/events.jsonl`, shared across TS and Python apps. Query with the CLI. The log holds snippets of flagged user content, so the dir/file are created owner-only (`0700`/`0600`; older installs are tightened on first write). The CLI strips terminal control characters from logged text before printing, so a flagged payload can't smuggle ANSI escape codes into your terminal when you review events.
 
@@ -91,14 +91,14 @@ initFileLogger(); // call once at startup — wires events → ~/.shield/events.
 ### React hook
 
 ```tsx
-import { ShieldProvider, useInjectionScan } from '@local/shield/react';
+import { ShieldProvider, useShield } from '@local/shield/react';
 
 function App() {
   return <ShieldProvider><YourApp /></ShieldProvider>;
 }
 
 function MessageInput() {
-  const { scan } = useInjectionScan();
+  const { scan } = useShield();
   const result = scan(userMessage);
   if (result.flagged) { /* warn the user */ }
 }

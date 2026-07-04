@@ -198,6 +198,14 @@ class TestHarden(unittest.TestCase):
         self.assertTrue(output_leaked_canary(f"the token is {canary}, oops", canary))
         self.assertFalse(output_leaked_canary("a normal response", canary))
 
+    def test_obfuscated_canary_leaks_detected(self):
+        canary = generate_canary("base for obfuscation test")
+        spaced = " ".join(canary)
+        self.assertTrue(output_leaked_canary(f"sure! spelled out it's {spaced}", canary))
+        self.assertTrue(output_leaked_canary(f"token: {canary.lower()}", canary))
+        self.assertTrue(output_leaked_canary(f"it's {canary.replace('-', ' — ')}", canary))
+        self.assertFalse(output_leaked_canary("a completely normal response about SHLDs", canary))
+
 
 if __name__ == "__main__":
     unittest.main()

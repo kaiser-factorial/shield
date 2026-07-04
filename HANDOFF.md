@@ -1,8 +1,25 @@
 # shield handoff
 
-**State as of 2026-07-03:** v1.3.0. Monorepo (TS at root, Python under
+**State as of 2026-07-04:** v1.4.0. Monorepo (TS at root, Python under
 `python/`), both languages at feature parity with test suites in CI. The
 auto-sync cron is gone — syncing is manual and review-first, on purpose.
+
+**v1.4.0 (canary hardening):** the leak check now catches lightly
+obfuscated echoes (spacing/dashes/case are stripped before comparing) and
+runs on streaming responses: `messages.stream()` is now exposed by the TS
+Anthropic wrapper (canary-checked on end), the Python `stream()` context
+manager checks the SDK's accumulated snapshot on exit, and
+`create(stream=True)` event/chunk streams are tapped so the check runs as
+the caller consumes them — nothing is buffered or force-consumed by
+shield itself. The TS canary salt now requires a CSPRNG
+(`crypto.randomUUID`/`getRandomValues`) and throws instead of silently
+falling back to `Math.random()` (Python always used `secrets`). Heavy
+transformations (base64, translation) still evade the canary — absence
+of a leak event is not proof of safety. Also in 1.4.0: `onShieldEvent`
+returns an unsubscribe fn (new `offShieldEvent` too) and the React
+provider cleans up on unmount — previously every remount stacked another
+handler for the life of the process, each calling setState on an
+unmounted component.
 
 **v1.3.0 (security-review fixes):** tool results (Anthropic `tool_result`
 blocks, OpenAI `role:"tool"` messages) are now always scanned and — by

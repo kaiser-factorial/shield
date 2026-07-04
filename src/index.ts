@@ -15,6 +15,7 @@ export {
   outputLeakedCanary,
   gateUserMessage,
   onShieldEvent,
+  offShieldEvent,
   emitShieldEvent,
   type InjectionScan,
   type InjectionExcerpt,
