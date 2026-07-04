@@ -261,8 +261,20 @@ export interface ShieldEvent {
 type LogHandler = (event: ShieldEvent) => void;
 const logHandlers: LogHandler[] = [];
 
-export function onShieldEvent(handler: LogHandler): void {
+/**
+ * Subscribe to shield events. Returns an unsubscribe function — subscribers
+ * that come and go (e.g. the React provider on remount) must call it, or
+ * stale handlers accumulate for the life of the process.
+ */
+export function onShieldEvent(handler: LogHandler): () => void {
   logHandlers.push(handler);
+  return () => offShieldEvent(handler);
+}
+
+/** Remove a previously registered handler (no-op if it isn't registered). */
+export function offShieldEvent(handler: LogHandler): void {
+  const i = logHandlers.indexOf(handler);
+  if (i >= 0) logHandlers.splice(i, 1);
 }
 
 export function emitShieldEvent(event: Omit<ShieldEvent, "timestamp">): void {

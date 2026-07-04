@@ -91,14 +91,14 @@ initFileLogger(); // call once at startup — wires events → ~/.shield/events.
 ### React hook
 
 ```tsx
-import { ShieldProvider, useInjectionScan } from '@local/shield/react';
+import { ShieldProvider, useShield } from '@local/shield/react';
 
 function App() {
   return <ShieldProvider><YourApp /></ShieldProvider>;
 }
 
 function MessageInput() {
-  const { scan } = useInjectionScan();
+  const { scan } = useShield();
   const result = scan(userMessage);
   if (result.flagged) { /* warn the user */ }
 }

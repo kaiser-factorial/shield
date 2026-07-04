@@ -15,7 +15,11 @@ shield itself. The TS canary salt now requires a CSPRNG
 (`crypto.randomUUID`/`getRandomValues`) and throws instead of silently
 falling back to `Math.random()` (Python always used `secrets`). Heavy
 transformations (base64, translation) still evade the canary — absence
-of a leak event is not proof of safety.
+of a leak event is not proof of safety. Also in 1.4.0: `onShieldEvent`
+returns an unsubscribe fn (new `offShieldEvent` too) and the React
+provider cleans up on unmount — previously every remount stacked another
+handler for the life of the process, each calling setState on an
+unmounted component.
 
 **v1.3.0 (security-review fixes):** tool results (Anthropic `tool_result`
 blocks, OpenAI `role:"tool"` messages) are now always scanned and — by
