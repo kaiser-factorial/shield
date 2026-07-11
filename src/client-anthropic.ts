@@ -40,7 +40,7 @@ export interface ShieldAnthropicOptions {
   /** Wrap user message content in <untrusted_user_message> blocks.
    *  Enable when messages contain external content (fetched pages, transcripts). */
   wrapUserMessages?: boolean;
-  /** Source label for emitted events, e.g. "voicelogger" or "brick". */
+  /** Source label for emitted events, e.g. "voicelogger" or "bulwork". */
   appLabel?: string;
   /** Print the startup banner (default true). The shield_started heartbeat
    *  event is emitted either way. */

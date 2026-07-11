@@ -115,7 +115,7 @@ safe = wrap_untrusted(user_text, "voice_transcript")
 npx shield logs              # tail ~/.shield/events.jsonl
 npx shield logs --limit 20
 npx shield logs --type injection_detected
-npx shield logs --source brick
+npx shield logs --source bulwork
 npx shield status            # per-app health, version drift, gone-quiet apps
 npx shield headless          # one-shot scan for browser automation processes
 npx shield headless --watch --interval 15   # keep watching, log new detections
@@ -143,7 +143,7 @@ Lesson learned the hard way (wearabLLM shipped with a broken import path for mon
 **1. Startup banner + heartbeat (automatic).** Constructing `ShieldAnthropicClient` / `ShieldOpenAIClient` prints once per process:
 
 ```
-[shield] v1.1.0 active · app=brick · 25 patterns · canary armed · wrap=off
+[shield] v1.1.0 active · app=bulwork · 25 patterns · canary armed · wrap=off
 ```
 
 …and emits a `shield_started` heartbeat event to the shared log. Apps using the lower-level primitives directly should call `announceShield({ appLabel })` / `announce_shield(app_label)` at startup. Pass `announce: false` or set `SHIELD_QUIET=1` to silence the banner — the heartbeat always fires. Get used to seeing the banner; its absence means shield didn't load.
@@ -153,7 +153,7 @@ Lesson learned the hard way (wearabLLM shipped with a broken import path for mon
 ```
 shield status (library v1.1.0, log: ~/.shield/events.jsonl)
 
-  brick        v1.0.0 · last start 7/1/2026 · 7d: 1 injections, 0 stripped, 0 leaks
+  bulwork      v1.0.0 · last start 7/1/2026 · 7d: 1 injections, 0 stripped, 0 leaks
     ⚠ running v1.0.0, repo is at v1.1.0 — rebuild/reinstall this app
   voicelogger  version unknown · no heartbeat ever · 7d: 0 injections, 0 stripped, 1 canary leaks
     ⚠ never announced — pre-v1.1 shield, or the integration isn't loading
@@ -168,7 +168,7 @@ There is no auto-update — that was removed on purpose (see the sync section be
 | Consumer | How it updates |
 |---|---|
 | wearabLLM (sys.path import of `python/`) | Immediately — imports the live source on next run |
-| brick, voicelogger-cli (`file:../shield`) | `npm install` (or `npm update @local/shield`) + rebuild |
+| bulwork, voicelogger-cli (`file:../shield`) | `npm install` (or `npm update @local/shield`) + rebuild |
 | group-chat (vendored copy) | `~/Projects/shield-sync.sh` (test-gated, review-first) |
 
 ## Tests
@@ -193,7 +193,7 @@ All events share `~/.shield/events.jsonl` — Python and TypeScript apps write t
 {
   "timestamp": "2026-06-28T16:00:00.000Z",
   "type": "injection_detected" | "canary_leaked" | "message_blocked",
-  "source": "brick" | "group-chat" | "voicelogger" | "wearabLLM",
+  "source": "bulwork" | "group-chat" | "voicelogger" | "wearabLLM",
   "severity": "low" | "medium" | "high",
   "patterns": ["role_hijack", "..."],
   "snippet": "first 120 chars of flagged text"
@@ -205,9 +205,13 @@ All events share `~/.shield/events.jsonl` — Python and TypeScript apps write t
 | App | Language | Integration |
 |---|---|---|
 | `group-chat` | TypeScript | `hardenSystemPrompt` on every bot call; `detectInjection` on user messages; Gemini history sanitized |
-| `brick` | TypeScript | `ShieldAnthropicClient`; page title wrapped as `untrusted_page_title` |
+| `bulwork` | TypeScript | `ShieldAnthropicClient`; page title wrapped as `untrusted_page_title` |
 | `voicelogger-cli` | TypeScript | `ShieldAnthropicClient`; transcript wrapped as `untrusted_voice_transcript` |
 | `wearabLLM` | Python | `ShieldAnthropicClient`; voice input wrapped and scanned |
+
+> Note: this table may be stale for `bulwork` — its current source uses shield's
+> lower-level primitives with dynamic per-call source strings, not a static
+> `ShieldAnthropicClient` app label as described above. Worth reconciling later.
 
 ## Updating group-chat's vendored copy
 

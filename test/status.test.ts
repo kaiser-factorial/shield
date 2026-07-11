@@ -64,22 +64,22 @@ test("summarizeStatus aggregates per app, parses versions, windows counts to 7 d
     new Date(now.getTime() - daysAgo * 24 * 60 * 60 * 1000).toISOString();
 
   const synthetic: ShieldEvent[] = [
-    { type: "shield_started", source: "brick", detail: "v1.0.0", timestamp: t(10) },
-    { type: "shield_started", source: "brick", detail: "v1.1.0", timestamp: t(1) },
+    { type: "shield_started", source: "bulwork", detail: "v1.0.0", timestamp: t(10) },
+    { type: "shield_started", source: "bulwork", detail: "v1.1.0", timestamp: t(1) },
     // source qualifiers after ":" group under the app name
-    { type: "injection_detected", source: "brick:page_title", detail: "x", score: 0.9, patterns: ["ignore-instructions"], timestamp: t(2) },
-    { type: "injection_detected", source: "brick", detail: "y", score: 0.9, patterns: ["jailbreak-dan"], timestamp: t(9) }, // outside window
+    { type: "injection_detected", source: "bulwork:page_title", detail: "x", score: 0.9, patterns: ["ignore-instructions"], timestamp: t(2) },
+    { type: "injection_detected", source: "bulwork", detail: "y", score: 0.9, patterns: ["jailbreak-dan"], timestamp: t(9) }, // outside window
     { type: "canary_leaked", source: "voicelogger", detail: "z", timestamp: t(3) },
     { type: "trigger_stripped", source: "wrap:untrusted_page_title", detail: "w", timestamp: t(1) },
   ];
 
   const apps = summarizeStatus(synthetic, now);
-  assert.deepEqual(apps.map((a) => a.app), ["brick", "voicelogger", "wrap"]);
+  assert.deepEqual(apps.map((a) => a.app), ["bulwork", "voicelogger", "wrap"]);
 
-  const brick = apps[0]!;
-  assert.equal(brick.version, "1.1.0", "latest heartbeat wins");
-  assert.equal(brick.lastStarted, t(1));
-  assert.equal(brick.injections7d, 1, "9-day-old injection falls outside the window");
+  const bulwork = apps[0]!;
+  assert.equal(bulwork.version, "1.1.0", "latest heartbeat wins");
+  assert.equal(bulwork.lastStarted, t(1));
+  assert.equal(bulwork.injections7d, 1, "9-day-old injection falls outside the window");
 
   const voicelogger = apps[1]!;
   assert.equal(voicelogger.version, null, "no heartbeat → unknown version");

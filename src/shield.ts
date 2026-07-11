@@ -228,7 +228,7 @@ export function emitShieldEvent(event: Omit<ShieldEvent, "timestamp">): void {
 // ── ANNOUNCE ─────────────────────────────────────────────────────────────────
 
 export interface AnnounceOptions {
-  /** App name shown in the banner and heartbeat, e.g. "brick". */
+  /** App name shown in the banner and heartbeat, e.g. "bulwork". */
   appLabel?: string;
   /** Print the console banner. The heartbeat event is emitted regardless. */
   banner?: boolean;

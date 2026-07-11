@@ -72,7 +72,7 @@ package.json/pyproject on each side.
 
 | app | link | update path |
 |---|---|---|
-| brick | `file:../shield` | `npm install` + `npm run build` (done for 1.1.0) |
+| bulwork | `file:../shield` | `npm install` + `npm run build` (done for 1.1.0) |
 | voicelogger-cli (`ledger_root/`) | `file:../../shield` | `npm install` (runs via tsx, no build) (done) |
 | group-chat | vendored `packages/shield/` | `~/Projects/shield-sync.sh` (done; see pending) |
 | wearabLLM v1 (`bridge.py`) | `sys.path` insert → `../../../shield/python` | imports live source — updates instantly |
@@ -107,7 +107,7 @@ exactly like no protection.* Hence banners + heartbeats + central status.
 ## pending / immediate next steps
 
 1. **Push group-chat** — sync commit `36e144d` is local-only.
-2. **Run brick and voicelogger once** — heartbeats fire at app startup,
+2. **Run bulwork and voicelogger once** — heartbeats fire at app startup,
    not install, so `shield status` shows "never announced" for them until
    their first post-rebuild run. After that, any "never announced" warning
    is a real alarm.
