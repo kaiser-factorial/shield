@@ -13,7 +13,7 @@
 
 // This file uses React but declares it as a peer dep so the package stays lean.
 // The importing app must have React installed.
-import { useState, useEffect, useCallback, createContext, useContext, createElement, useRef, type ReactNode } from "react";
+import { useState, useEffect, useCallback, createContext, useContext, createElement, type ReactNode } from "react";
 import { onShieldEvent, detectInjection, wrapUntrusted, type ShieldEvent, type InjectionScan } from "./shield.js";
 
 export interface ShieldContextValue {
@@ -31,12 +31,12 @@ const ShieldContext = createContext<ShieldContextValue | null>(null);
 
 export function ShieldProvider({ children, maxEvents = 500 }: { children: ReactNode; maxEvents?: number }) {
   const [events, setEvents] = useState<ShieldEvent[]>([]);
-  const registeredRef = useRef(false);
 
+  // Subscribe on mount, unsubscribe on unmount. The cleanup matters: without
+  // it every remount stacked another handler for the life of the process,
+  // each one calling setState on an unmounted component.
   useEffect(() => {
-    if (registeredRef.current) return;
-    registeredRef.current = true;
-    onShieldEvent((ev) => {
+    return onShieldEvent((ev) => {
       setEvents((prev) => {
         const next = [...prev, ev];
         return next.length > maxEvents ? next.slice(-maxEvents) : next;

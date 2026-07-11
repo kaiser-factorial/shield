@@ -1,9 +1,44 @@
 # shield handoff
 
-**State as of 2026-07-02:** v1.2.0. Monorepo (TS at root, Python under
-`python/`), both languages at feature parity with test suites in CI. All
-four consumer apps rebuilt. The auto-sync cron is gone — syncing is
-manual and review-first, on purpose.
+**State as of 2026-07-04:** v1.4.0. Monorepo (TS at root, Python under
+`python/`), both languages at feature parity with test suites in CI. The
+auto-sync cron is gone — syncing is manual and review-first, on purpose.
+
+**v1.4.0 (canary hardening):** the leak check now catches lightly
+obfuscated echoes (spacing/dashes/case are stripped before comparing) and
+runs on streaming responses: `messages.stream()` is now exposed by the TS
+Anthropic wrapper (canary-checked on end), the Python `stream()` context
+manager checks the SDK's accumulated snapshot on exit, and
+`create(stream=True)` event/chunk streams are tapped so the check runs as
+the caller consumes them — nothing is buffered or force-consumed by
+shield itself. The TS canary salt now requires a CSPRNG
+(`crypto.randomUUID`/`getRandomValues`) and throws instead of silently
+falling back to `Math.random()` (Python always used `secrets`). Heavy
+transformations (base64, translation) still evade the canary — absence
+of a leak event is not proof of safety. Also in 1.4.0: `onShieldEvent`
+returns an unsubscribe fn (new `offShieldEvent` too) and the React
+provider cleans up on unmount — previously every remount stacked another
+handler for the life of the process, each calling setState on an
+unmounted component.
+
+**v1.3.0 (security-review fixes):** tool results (Anthropic `tool_result`
+blocks, OpenAI `role:"tool"` messages) are now always scanned and — by
+default — wrapped as `<untrusted_tool_result>` (`wrapToolResults` /
+`wrap_tool_results` to opt out of wrapping only); tool-side detections log
+with a `:tool_result` source qualifier. `shield logs` / `headless` strip
+terminal control chars from attacker-controlled text before printing
+(ANSI/OSC escape injection). `~/.shield` is created `0700`/`0600` and
+legacy perms are tightened on first write. The DAN pattern split in two:
+`jailbreak-dan` matches all-caps `DAN` only (people named Dan no longer
+flag) and `do-anything-now` catches the spelled-out phrase in any case —
+26 patterns now. Injection events carry per-match excerpts (±60 chars of
+context around what tripped the pattern) as `detail`, instead of the
+head of the message, so deep-in-the-page hits are triageable. OpenAI
+wrappers no longer clobber extra system messages (only the first
+system/developer message is hardened; later ones pass through intact)
+and `role: "developer"` is hardened in place instead of being ignored.
+Consumers need a rebuild / `npm install` to pick this up —
+`shield status` will flag the drift.
 
 ---
 
@@ -12,7 +47,7 @@ manual and review-first, on purpose.
 Prompt-injection defense library for LLM apps. Three-layer model plus
 observability:
 
-1. **DETECT** — 25 weighted regex patterns (`detectInjection` /
+1. **DETECT** — 26 weighted regex patterns (`detectInjection` /
    `detect_injection`). A tripwire, not a gate: trivially bypassed by
    translation/encoding/rephrasing, so callers decide whether to block.
 2. **WRAP** — `wrapUntrusted` tags external content in `<untrusted_*>` XML

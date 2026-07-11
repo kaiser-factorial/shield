@@ -27,10 +27,23 @@ async function ensureLogDir(): Promise<boolean> {
   const fs = await getFs();
   if (!fs) return false;
   try {
-    if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+    // The log stores snippets of user messages and transcripts — owner-only.
+    if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Best-effort tighten of perms on a log dir/file created by older versions. */
+async function tightenPermissions(): Promise<void> {
+  const fs = await getFs();
+  if (!fs) return;
+  try {
+    if (fs.existsSync(LOG_DIR)) fs.chmodSync(LOG_DIR, 0o700);
+    if (fs.existsSync(LOG_FILE)) fs.chmodSync(LOG_FILE, 0o600);
+  } catch {
+    // Never throw from a logging side-effect
   }
 }
 
@@ -39,7 +52,7 @@ async function appendEvent(event: ShieldEvent): Promise<void> {
   if (!fs) return;
   try {
     if (!(await ensureLogDir())) return;
-    fs.appendFileSync(LOG_FILE, JSON.stringify(event) + "\n", "utf8");
+    fs.appendFileSync(LOG_FILE, JSON.stringify(event) + "\n", { encoding: "utf8", mode: 0o600 });
   } catch {
     // Never throw from a logging side-effect
   }
@@ -52,7 +65,22 @@ async function appendEvent(event: ShieldEvent): Promise<void> {
 export function initFileLogger(): void {
   if (initialized) return;
   initialized = true;
+  void tightenPermissions(); // fix up dirs/files created before v1.3.0
   onShieldEvent((ev) => void appendEvent(ev));
+}
+
+/**
+ * Strip terminal control characters from attacker-controlled text before
+ * printing it. Event `detail` holds raw snippets of flagged content (and
+ * process command lines) — without this, a malicious page/transcript could
+ * embed ANSI/OSC escape sequences that rewrite or hide what `shield logs`
+ * shows on screen. Newlines/tabs become spaces so one event stays one line.
+ */
+export function sanitizeForTerminal(text: string): string {
+  return text
+    .replace(/[\n\t]/g, " ")
+    // C0 controls (incl. ESC and \r), DEL, and C1 controls (incl. CSI/OSC 0x9B/0x9D)
+    .replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "");
 }
 
 export interface ReadEventsOptions {

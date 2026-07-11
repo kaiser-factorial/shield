@@ -16,6 +16,7 @@
 import {
   announceShield,
   detectInjection,
+  scanDetail,
   generateCanary,
   hardenSystemPrompt,
   outputLeakedCanary,
@@ -23,6 +24,7 @@ import {
   securityBoilerplate,
   wrapUntrusted,
 } from "./shield.js";
+import { tapEventStream } from "./stream.js";
 
 // Structural interface — matches the Anthropic SDK without importing it
 interface AnthropicMessages {
@@ -30,6 +32,8 @@ interface AnthropicMessages {
   create(params: any): Promise<any>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   parse?(params: any): Promise<any>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  stream?(params: any): any;
 }
 
 interface AnthropicLike {
@@ -40,6 +44,11 @@ export interface ShieldAnthropicOptions {
   /** Wrap user message content in <untrusted_user_message> blocks.
    *  Enable when messages contain external content (fetched pages, transcripts). */
   wrapUserMessages?: boolean;
+  /** Wrap tool_result content in <untrusted_tool_result> blocks (default true).
+   *  Tool results are machine-fetched external content — the main indirect
+   *  injection vector in agentic apps — so unlike user messages this is on
+   *  by default. Detection scanning of tool results is always on. */
+  wrapToolResults?: boolean;
   /** Source label for emitted events, e.g. "voicelogger" or "bulwork". */
   appLabel?: string;
   /** Print the startup banner (default true). The shield_started heartbeat
@@ -57,6 +66,50 @@ function extractText(content: any): string {
       .join(" ");
   }
   return String(content ?? "");
+}
+
+/**
+ * Text carried inside tool_result blocks of a user message. Tool results are
+ * where fetched pages, file contents, and search output enter the context —
+ * the primary indirect-injection channel — so they get their own extraction
+ * (and their own event source qualifier) instead of riding along with typed
+ * user text.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractToolResultText(content: any): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((b) => b && b.type === "tool_result")
+    .map((b) => (typeof b.content === "string" ? b.content : extractText(b.content)))
+    .filter(Boolean)
+    .join(" ");
+}
+
+/**
+ * Wrap the text inside tool_result blocks as <untrusted_tool_result> while
+ * preserving block structure (string content stays a string, image parts
+ * inside array-form content are untouched).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wrapToolResultBlocks(content: any): any {
+  if (!Array.isArray(content)) return content;
+  return content.map((b) => {
+    if (!b || b.type !== "tool_result") return b;
+    if (typeof b.content === "string") {
+      return { ...b, content: wrapUntrusted(b.content, "tool_result") };
+    }
+    if (Array.isArray(b.content)) {
+      return {
+        ...b,
+        content: b.content.map((p: { type?: string; text?: string }) =>
+          p && p.type === "text" && typeof p.text === "string"
+            ? { ...p, text: wrapUntrusted(p.text, "tool_result") }
+            : p,
+        ),
+      };
+    }
+    return b;
+  });
 }
 
 /**
@@ -102,6 +155,14 @@ function wrapUserContent(content: any): any {
   return content;
 }
 
+/** Text carried by a raw Anthropic stream event (create({stream:true})). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function anthropicDeltaText(ev: any): string {
+  return ev?.type === "content_block_delta" && ev.delta?.type === "text_delta"
+    ? (ev.delta.text ?? "")
+    : "";
+}
+
 export class ShieldAnthropicClient {
   constructor(
     private readonly inner: AnthropicLike,
@@ -120,7 +181,15 @@ export class ShieldAnthropicClient {
     return {
       create: (params: Record<string, unknown>) => self._create(params),
       parse: (params: Record<string, unknown>) => self._parse(params),
+      stream: (params: Record<string, unknown>) => self._stream(params),
     };
+  }
+
+  private _checkCanaryText(outputText: string, canary: string): void {
+    if (!outputText || !outputLeakedCanary(outputText, canary)) return;
+    const appLabel = this.opts.appLabel ?? "shield";
+    emitShieldEvent({ type: "canary_leaked", source: appLabel, detail: outputText.slice(0, 200) });
+    console.warn(`[shield] Canary leak detected in response from ${appLabel}`);
   }
 
   private _prepare(params: Record<string, unknown>): { prepared: Record<string, unknown>; canary: string } {
@@ -136,22 +205,39 @@ export class ShieldAnthropicClient {
         emitShieldEvent({
           type: "injection_detected",
           source: appLabel,
-          detail: text.slice(0, 200),
+          detail: scanDetail(text, scan),
           score: scan.score,
           patterns: scan.matches,
         });
       }
-      if (this.opts.wrapUserMessages) {
-        return { ...m, content: wrapUserContent(m["content"]) };
+
+      // Tool results carry external content (fetched pages, files, search
+      // output) — scan them always, with a source qualifier so `shield logs`
+      // shows where the injection came in.
+      const toolText = extractToolResultText(m["content"]);
+      if (toolText) {
+        const toolScan = detectInjection(toolText);
+        if (toolScan.flagged) {
+          emitShieldEvent({
+            type: "injection_detected",
+            source: `${appLabel}:tool_result`,
+            detail: scanDetail(toolText, toolScan),
+            score: toolScan.score,
+            patterns: toolScan.matches,
+          });
+        }
       }
-      return m;
+
+      let content = m["content"];
+      if (this.opts.wrapToolResults !== false) content = wrapToolResultBlocks(content);
+      if (this.opts.wrapUserMessages) content = wrapUserContent(content);
+      return content === m["content"] ? m : { ...m, content };
     });
 
     return { prepared: { ...params, system: hardenedSystem, messages }, canary };
   }
 
   private async _create(params: Record<string, unknown>) {
-    const appLabel = this.opts.appLabel ?? "shield";
     const { prepared, canary } = this._prepare(params);
     const response = await this.inner.messages.create(prepared);
 
@@ -160,17 +246,17 @@ export class ShieldAnthropicClient {
         .filter((b: { type: string }) => b.type === "text")
         .map((b: { type: string; text: string }) => b.text)
         .join("");
-      if (outputLeakedCanary(outputText, canary)) {
-        emitShieldEvent({ type: "canary_leaked", source: appLabel, detail: outputText.slice(0, 200) });
-        console.warn(`[shield] Canary leak detected in response from ${appLabel}`);
-      }
+      this._checkCanaryText(outputText, canary);
+    } else if (params["stream"] === true) {
+      // create({stream: true}) returns a raw event stream — tap it so the
+      // canary check runs as the caller consumes it (previously unchecked).
+      return tapEventStream(response, anthropicDeltaText, (text) => this._checkCanaryText(text, canary));
     }
 
     return response;
   }
 
   private async _parse(params: Record<string, unknown>) {
-    const appLabel = this.opts.appLabel ?? "shield";
     const { prepared, canary } = this._prepare(params);
     const parseFn = this.inner.messages.parse;
     if (!parseFn) throw new Error("This Anthropic client does not support messages.parse");
@@ -181,12 +267,32 @@ export class ShieldAnthropicClient {
         .filter((b: { type: string }) => b.type === "text")
         .map((b: { type: string; text: string }) => b.text)
         .join("");
-      if (outputLeakedCanary(outputText, canary)) {
-        emitShieldEvent({ type: "canary_leaked", source: appLabel, detail: outputText.slice(0, 200) });
-        console.warn(`[shield] Canary leak detected in response from ${appLabel}`);
-      }
+      this._checkCanaryText(outputText, canary);
     }
 
     return response;
+  }
+
+  /**
+   * Shield-aware messages.stream(): hardens/scans like create, then checks
+   * the canary on the streamed text. The SDK's MessageStream emits "text"
+   * events as the caller consumes it, so this buffers nothing extra.
+   */
+  private _stream(params: Record<string, unknown>) {
+    const { prepared, canary } = this._prepare(params);
+    const streamFn = this.inner.messages.stream;
+    if (!streamFn) throw new Error("This Anthropic client does not support messages.stream");
+    const stream = streamFn.call(this.inner.messages, prepared);
+
+    try {
+      if (stream && typeof stream.on === "function") {
+        let buf = "";
+        stream.on("text", (t: string) => { buf += t; });
+        stream.on("end", () => this._checkCanaryText(buf, canary));
+        return stream;
+      }
+    } catch { /* canary observation must never break streaming */ }
+    // Not an event emitter (unusual client): fall back to tapping iteration.
+    return tapEventStream(stream, anthropicDeltaText, (text) => this._checkCanaryText(text, canary));
   }
 }
