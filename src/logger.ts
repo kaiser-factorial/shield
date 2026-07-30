@@ -7,7 +7,16 @@
 
 import { onShieldEvent, type ShieldEvent } from "./shield.js";
 
-const LOG_DIR = `${process.env.HOME ?? "~"}/.shield`;
+// `process` does not exist in a browser, and this module is reachable from the
+// package entrypoint (index.ts re-exports readEvents / summarizeStatus /
+// sanitizeForTerminal). Reading process.env.HOME at module scope therefore threw
+// a ReferenceError on import for any browser consumer whose bundler did not
+// tree-shake this file away — defeating the "falls back silently in browser
+// contexts" promise in the docstring above, because the throw happens before any
+// fallback can run.
+const HOME =
+  typeof process !== "undefined" && process.env ? (process.env.HOME ?? "~") : "~";
+const LOG_DIR = `${HOME}/.shield`;
 const LOG_FILE = `${LOG_DIR}/events.jsonl`;
 
 let initialized = false;

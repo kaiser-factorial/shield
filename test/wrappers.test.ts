@@ -486,3 +486,32 @@ test("openai: canary echoed in the response is detected", async () => {
   assert.equal(leaks.length, 1);
   assert.equal(leaks[0]!.source, "leaky-oai");
 });
+
+test("stream tap: a stream that errors mid-flight still canary-checks what it emitted", async () => {
+  const { tapEventStream } = await import("../src/stream.js");
+  let checked: string | null = null;
+
+  const failing = {
+    [Symbol.asyncIterator]() {
+      let i = 0;
+      return {
+        async next() {
+          i++;
+          if (i === 1) return { done: false, value: "leaked SHLD-ABC123 " };
+          throw new Error("connection reset");
+        },
+        [Symbol.asyncIterator]() { return this; },
+      };
+    },
+  };
+
+  const tapped = tapEventStream(failing, (ev: unknown) => String(ev), (text: string) => { checked = text; });
+
+  await assert.rejects(async () => {
+    for await (const _ of tapped) { void _; }
+  }, /connection reset/);
+
+  // Before the fix, `checked` stayed null: the partial text — which is exactly
+  // where a leak in a broken-off answer would live — was never examined.
+  assert.equal(checked, "leaked SHLD-ABC123 ");
+});

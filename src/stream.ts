@@ -26,7 +26,17 @@ export function tapEventStream(stream: any, extract: (ev: any) => string, onDone
       };
       return {
         async next() {
-          const r = await it.next();
+          let r;
+          try {
+            r = await it.next();
+          } catch (e) {
+            // A stream that fails partway still emitted text, and that text can
+            // still contain the canary. Without this the partial output was
+            // never checked — the one case where a leak is most likely to slip
+            // through is a response that broke off mid-answer.
+            finish();
+            throw e;
+          }
           if (r.done) finish();
           else buf += extract(r.value);
           return r;
@@ -36,6 +46,10 @@ export function tapEventStream(stream: any, extract: (ev: any) => string, onDone
           return it.return ? it.return(v) : { done: true, value: v };
         },
         async throw(e?: unknown) {
+          // Same reasoning as the catch above: abandoning via throw() still
+          // leaves accumulated text worth checking. `return()` already did this;
+          // the two paths disagreeing was an oversight, not a decision.
+          finish();
           if (it.throw) return it.throw(e);
           throw e;
         },

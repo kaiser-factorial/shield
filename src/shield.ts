@@ -14,7 +14,7 @@
  * (a test enforces the package.json half). Announced in startup banners and
  * heartbeat events so `shield status` can flag apps running stale copies.
  */
-export const SHIELD_VERSION = "1.4.0";
+export const SHIELD_VERSION = "1.4.1";
 
 // ── 1. DETECT ────────────────────────────────────────────────────────────────
 
@@ -279,7 +279,25 @@ export function offShieldEvent(handler: LogHandler): void {
 
 export function emitShieldEvent(event: Omit<ShieldEvent, "timestamp">): void {
   const full: ShieldEvent = { ...event, timestamp: new Date().toISOString() };
-  for (const h of logHandlers) h(full);
+  // Iterate a COPY: a handler is allowed to unsubscribe itself or another
+  // handler (the React provider does exactly this on unmount), and splicing the
+  // live array mid-iteration makes `for..of` skip the following handler. For a
+  // security event bus, silently dropping an event is the worst failure mode.
+  //
+  // And isolate each handler: emitShieldEvent is called from wrapUntrusted,
+  // which is the core WRAP primitive on the hot path of every consumer. Without
+  // the try/catch a single buggy subscriber made wrapUntrusted itself throw —
+  // so a logging bug broke content sanitization — and stopped every later
+  // handler, including the file logger, from seeing the event.
+  for (const h of [...logHandlers]) {
+    try {
+      h(full);
+    } catch (err) {
+      // Deliberately console, not emitShieldEvent: re-entering the bus from
+      // inside its own dispatch loop is how you get infinite recursion.
+      console.error("[shield] event handler threw; continuing:", err);
+    }
+  }
 }
 
 // ── ANNOUNCE ─────────────────────────────────────────────────────────────────

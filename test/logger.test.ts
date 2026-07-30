@@ -79,3 +79,21 @@ test("log dir is 0700 and log file is 0600 after first write", async () => {
   assert.equal(mode(LOG_DIR), 0o700);
   assert.equal(mode(LOG_FILE), 0o600);
 });
+
+test("logger module scope does not require `process` (browser safety)", async () => {
+  // index.ts re-exports readEvents / summarizeStatus / sanitizeForTerminal, so
+  // this module is reachable from the package entrypoint. Reading
+  // process.env.HOME at module scope threw a ReferenceError on import in any
+  // browser bundle that didn't tree-shake the file away — before the documented
+  // "falls back silently in browser contexts" path could run.
+  const realProcess = globalThis.process;
+  try {
+    // @ts-expect-error — simulating a browser, where `process` is absent
+    delete globalThis.process;
+    const mod = await import(`../src/logger.js?noprocess=${Date.now()}`);
+    assert.equal(typeof mod.sanitizeForTerminal, "function");
+    assert.ok(mod.LOG_FILE.endsWith("/.shield/events.jsonl"));
+  } finally {
+    globalThis.process = realProcess;
+  }
+});
