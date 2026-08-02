@@ -1,6 +1,6 @@
 {
   "name": "@local/shield",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Prompt injection defense utilities \u2014 detect, wrap, harden, log",
   "type": "module",
   "main": "./dist/src/index.js",

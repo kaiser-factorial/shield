@@ -14,7 +14,7 @@
  * (a test enforces the package.json half). Announced in startup banners and
  * heartbeat events so `shield status` can flag apps running stale copies.
  */
-export const SHIELD_VERSION = "1.4.1";
+export const SHIELD_VERSION = "1.4.2";
 
 // ── 1. DETECT ────────────────────────────────────────────────────────────────
 
@@ -23,6 +23,11 @@ export interface InjectionExcerpt {
   pattern: string;
   /** the matched text with ±60 chars of surrounding context (ellipsized) */
   excerpt: string;
+  /** 1-based line of the match within the scanned text — "somewhere in this
+   *  10k-char page" is not actionable during triage; a line number is */
+  line: number;
+  /** 0-based char offset of the match within the scanned text */
+  index: number;
 }
 
 export interface InjectionScan {
@@ -88,6 +93,15 @@ export const PATTERN_COUNT = INJECTION_PATTERNS.length;
 
 const EXCERPT_RADIUS = 60;
 
+/** 1-based line number of a char offset. */
+function lineOf(text: string, index: number): number {
+  let line = 1;
+  for (let i = 0; i < index; i++) {
+    if (text.charCodeAt(i) === 10) line++;
+  }
+  return line;
+}
+
 function matchContext(text: string, index: number, length: number): string {
   const start = Math.max(0, index - EXCERPT_RADIUS);
   const end = Math.min(text.length, index + length + EXCERPT_RADIUS);
@@ -105,7 +119,12 @@ export function detectInjection(text: string, threshold = 0.5): InjectionScan {
     const m = re.exec(text);
     if (m) {
       matches.push(label);
-      excerpts.push({ pattern: label, excerpt: matchContext(text, m.index, m[0].length) });
+      excerpts.push({
+        pattern: label,
+        excerpt: matchContext(text, m.index, m[0].length),
+        line: lineOf(text, m.index),
+        index: m.index,
+      });
       if (weight > maxWeight) maxWeight = weight;
     }
   }
@@ -125,7 +144,7 @@ export function detectInjection(text: string, threshold = 0.5): InjectionScan {
  */
 export function scanDetail(text: string, scan: InjectionScan): string {
   if (scan.excerpts.length === 0) return text.slice(0, 200);
-  return scan.excerpts.map((e) => `[${e.pattern}] ${e.excerpt}`).join(" | ").slice(0, 200);
+  return scan.excerpts.map((e) => `[${e.pattern} @L${e.line}] "${e.excerpt}"`).join(" | ").slice(0, 300);
 }
 
 // ── 2. WRAP ──────────────────────────────────────────────────────────────────
