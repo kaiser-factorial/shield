@@ -133,7 +133,7 @@ test("scanDetail: includes pattern, line number and a quoted excerpt", () => {
 });
 
 test("detect: threshold is configurable", () => {
-  const text = "act as a translator for this paragraph"; // weight 0.5
+  const text = "pretend you are a pirate for this paragraph"; // weight 0.5
   assert.equal(detectInjection(text, 0.5).flagged, true);
   assert.equal(detectInjection(text, 0.6).flagged, false);
 });

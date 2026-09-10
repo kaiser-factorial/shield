@@ -15,6 +15,12 @@
   ~/.shield/events.jsonl, posts a macOS notification per new detection.
   It executes nothing it finds and changes nothing — safe to run always.
 -->
+<!--
+  Template: replace __NODE__ (`which node`), __SHIELD_REPO__ (this repo's
+  absolute path) and __HOME__ before installing. One-liner from the repo root:
+    sed -e "s|__NODE__|$(which node)|g" -e "s|__SHIELD_REPO__|$PWD|g" -e "s|__HOME__|$HOME|g" \
+        launchd/com.shield.headless-watch.plist > ~/Library/LaunchAgents/com.shield.headless-watch.plist
+-->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -22,8 +28,8 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/node</string>
-    <string>/Users/corinakaiser/Projects/shield/dist/bin/shield-cli.js</string>
+    <string>__NODE__</string>
+    <string>__SHIELD_REPO__/dist/bin/shield-cli.js</string>
     <string>headless</string>
     <string>--watch</string>
     <string>--interval</string>
@@ -38,8 +44,8 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/corinakaiser/.shield/headless-watch.log</string>
+  <string>__HOME__/.shield/headless-watch.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/corinakaiser/.shield/headless-watch.log</string>
+  <string>__HOME__/.shield/headless-watch.log</string>
 </dict>
 </plist>

@@ -14,7 +14,7 @@
  * (a test enforces the package.json half). Announced in startup banners and
  * heartbeat events so `shield status` can flag apps running stale copies.
  */
-export const SHIELD_VERSION = "1.4.2";
+export const SHIELD_VERSION = "1.5.0";
 
 // ── 1. DETECT ────────────────────────────────────────────────────────────────
 
@@ -23,10 +23,10 @@ export interface InjectionExcerpt {
   pattern: string;
   /** the matched text with ±60 chars of surrounding context (ellipsized) */
   excerpt: string;
-  /** 1-based line of the match within the scanned text — "somewhere in this
-   *  10k-char page" is not actionable during triage; a line number is */
+  /** 1-based line of the match within the (normalized) scanned text — "somewhere
+   *  in this 10k-char page" is not actionable during triage; a line number is */
   line: number;
-  /** 0-based char offset of the match within the scanned text */
+  /** 0-based char offset of the match within the (normalized) scanned text */
   index: number;
 }
 
@@ -39,7 +39,23 @@ export interface InjectionScan {
   flagged: boolean;
   /** context around each match — what actually tripped the pattern, for triage */
   excerpts: InjectionExcerpt[];
+  /** true when the input exceeded MAX_SCAN_CHARS and only its head and tail were scanned */
+  truncated: boolean;
 }
+
+// Zero-width / invisible format characters. Models ignore them; regexes don't.
+// Stripped before scanning, and tolerated inside the tag-breakout matcher so a
+// closing tag padded with U+200B can't slip past the sanitizer.
+const ZERO_WIDTH_CLASS = "\\u00AD\\u200B-\\u200F\\u2060-\\u2064\\uFEFF";
+const ZERO_WIDTH_RE = new RegExp(`[${ZERO_WIDTH_CLASS}]`, "g");
+const ZW = `[${ZERO_WIDTH_CLASS}]*`;
+
+// Bounded quantifiers only: `\s*` next to another `\s*` (or after a multiline
+// `^`, where \s also eats newlines) was quadratic — 40k whitespace chars took
+// seconds in TS and half a minute in Python, on attacker-controlled input.
+const TAG_BREAKOUT_SRC =
+  `[<＜][ \\t${ZERO_WIDTH_CLASS}]{0,16}\\/?[ \\t${ZERO_WIDTH_CLASS}]{0,16}` +
+  ["u", "n", "t", "r", "u", "s", "t", "e", "d"].join(ZW) + "[\\w-]*";
 
 const INJECTION_PATTERNS: Array<{ label: string; re: RegExp; weight: number }> = [
   // Classic override attempts
@@ -49,23 +65,29 @@ const INJECTION_PATTERNS: Array<{ label: string; re: RegExp; weight: number }> =
   { label: "new-instructions",      re: /new\s+(instructions?|directive|rules?|orders?)\s*:/i, weight: 0.75 },
   { label: "override-instructions", re: /override\s+(your\s+)?(instructions?|rules?|programming)/i, weight: 0.85 },
 
-  // Role hijacking
+  // Role hijacking. "act as" / "roleplay as" / "what are your rules" are
+  // everyday phrasing ("act as a translator", "what are your rules for
+  // refunds"), so they sit below the 0.5 threshold and only flag when they
+  // co-occur with something stronger.
   { label: "you-are-now",           re: /you\s+are\s+now\s+(a|an|the)\s+\w/i, weight: 0.7 },
-  { label: "act-as",                re: /act\s+as\s+(a|an|the)\s+\w/i, weight: 0.5 },
-  { label: "pretend-you-are",       re: /pretend\s+(you\s+are|to\s+be)\s+/i, weight: 0.6 },
-  { label: "roleplay-as",           re: /roleplay\s+as\s+/i, weight: 0.5 },
+  { label: "act-as",                re: /act\s+as\s+(a|an|the)\s+\w/i, weight: 0.4 },
+  { label: "pretend-you-are",       re: /pretend\s+(you\s+are|to\s+be)\s+/i, weight: 0.5 },
+  { label: "roleplay-as",           re: /roleplay\s+as\s+/i, weight: 0.4 },
   { label: "your-new-persona",      re: /your\s+(new\s+)?(persona|identity|role)\s+is/i, weight: 0.7 },
 
   // System prompt exposure attempts
   { label: "reveal-system-prompt",  re: /reveal\s+(your\s+)?(system\s+prompt|instructions?|hidden\s+prompt)/i, weight: 0.9 },
   { label: "print-system-prompt",   re: /print\s+(your\s+)?(system\s+prompt|initial\s+prompt)/i, weight: 0.85 },
-  { label: "what-is-your-system",   re: /what\s+(is|are)\s+your\s+(system\s+prompt|instructions?|rules?)/i, weight: 0.6 },
+  { label: "what-is-your-system",   re: /what\s+(is|are)\s+your\s+(system\s+prompt|instructions?|rules?)/i, weight: 0.45 },
   { label: "repeat-above",          re: /repeat\s+(everything|all\s+(text|content|instructions?))\s+(above|before)/i, weight: 0.75 },
+  { label: "encode-above",          re: /(encode|base64|rot13|translate)\s+(the\s+)?(above|previous|prior|system\s+prompt|your\s+instructions?)/i, weight: 0.5 },
 
-  // Embedded system-role spoofing
-  { label: "system-tag",            re: /^\s*\[(system|admin|operator)\]/im, weight: 0.8 },
-  { label: "system-colon",          re: /^\s*(system|admin|operator)\s*:\s+/im, weight: 0.7 },
-  { label: "xml-system-tag",        re: /<(system|instructions?|prompt)\s*>/i, weight: 0.75 },
+  // Embedded system-role spoofing. After a multiline `^`, only horizontal
+  // whitespace — `\s*` there is quadratic on a run of newlines.
+  { label: "system-tag",            re: /^[ \t]*\[(system|admin|operator)\]/im, weight: 0.8 },
+  { label: "system-colon",          re: /^[ \t]*(system|admin|operator)[ \t]*:[ \t]+/im, weight: 0.7 },
+  { label: "xml-system-tag",        re: /<(system|instructions?|prompt)[ \t]{0,8}>/i, weight: 0.75 },
+  { label: "chat-delimiter-spoof",  re: /<\|(im_start|im_end|system|user|assistant|endoftext|start_header_id|eot_id)\|>|\[INST\]|<<SYS>>/i, weight: 0.8 },
 
   // Jailbreak boilerplate
   // The acronym is case-SENSITIVE on purpose: jailbreak boilerplate writes
@@ -83,10 +105,17 @@ const INJECTION_PATTERNS: Array<{ label: string; re: RegExp; weight: number }> =
   { label: "if-you-see-this",       re: /if\s+you\s+(see|read|process)\s+this/i, weight: 0.55 },
   { label: "hidden-instruction",    re: /hidden\s+(instruction|command|directive)/i, weight: 0.7 },
 
+  // Exfiltration setup — the payload of most real indirect injections is
+  // "send what you know somewhere". A markdown image whose URL carries a long
+  // query string is the classic zero-click channel; "send/post this to" is the
+  // explicit form.
+  { label: "markdown-image-exfil",  re: /!\[[^\]\n]{0,200}\]\((?:https?:)?\/\/[^)\s]{1,300}\?[^)\s]{16,}\)/i, weight: 0.8 },
+  { label: "exfil-send-to",         re: /\b(send|post|email|forward|transmit|upload)\s+(this|it|them|the\s+(above|conversation|data|contents?|response|results?|history|document))\s+to\s+/i, weight: 0.6 },
+
   // Boundary breakout — content trying to open/close shield's <untrusted_*>
   // wrapper tags to escape the trust boundary. Scan raw text BEFORE wrapping;
   // wrapped output contains these tags legitimately.
-  { label: "untrusted-tag-breakout", re: /[<＜]\s*\/?\s*untrusted[\w-]*/i, weight: 0.85 },
+  { label: "untrusted-tag-breakout", re: new RegExp(TAG_BREAKOUT_SRC, "i"), weight: 0.85 },
 ];
 
 export const PATTERN_COUNT = INJECTION_PATTERNS.length;
@@ -110,19 +139,49 @@ function matchContext(text: string, index: number, length: number): string {
   return pre + text.slice(start, end).replace(/\s+/g, " ").trim() + post;
 }
 
+/**
+ * Canonicalize text before pattern matching so cheap evasions don't work:
+ * NFKC folds fullwidth/compatibility forms (fullwidth "ignore" → "ignore"),
+ * zero-width characters are dropped, and single letters separated by one
+ * punctuation/space each ("i-g-n-o-r-e", "i g n o r e") are rejoined.
+ * Excerpt line/offset values refer to this normalized text.
+ */
+export function normalizeForScan(text: string): string {
+  let t = text.normalize("NFKC").replace(ZERO_WIDTH_RE, "");
+  // Letter-separator-letter runs of 4+ letters. The class is a single char per
+  // step, so this is linear.
+  t = t.replace(/\b(?:[a-z][-._*~ ]){3,}[a-z]\b/gi, (m) => m.replace(/[-._*~ ]/g, ""));
+  return t;
+}
+
+/**
+ * Longest input the patterns are run against. Beyond this the scan covers the
+ * head and tail of the text and reports `truncated: true` — a 5 MB tool result
+ * shouldn't be able to pin a CPU, even with linear patterns.
+ */
+export const MAX_SCAN_CHARS = 512 * 1024;
+
 export function detectInjection(text: string, threshold = 0.5): InjectionScan {
   const matches: string[] = [];
   const excerpts: InjectionExcerpt[] = [];
   let maxWeight = 0;
 
+  let scanned = normalizeForScan(String(text ?? ""));
+  let truncated = false;
+  if (scanned.length > MAX_SCAN_CHARS) {
+    const half = MAX_SCAN_CHARS / 2;
+    scanned = scanned.slice(0, half) + "\n…\n" + scanned.slice(-half);
+    truncated = true;
+  }
+
   for (const { label, re, weight } of INJECTION_PATTERNS) {
-    const m = re.exec(text);
+    const m = re.exec(scanned);
     if (m) {
       matches.push(label);
       excerpts.push({
         pattern: label,
-        excerpt: matchContext(text, m.index, m[0].length),
-        line: lineOf(text, m.index),
+        excerpt: matchContext(scanned, m.index, m[0].length),
+        line: lineOf(scanned, m.index),
         index: m.index,
       });
       if (weight > maxWeight) maxWeight = weight;
@@ -134,7 +193,7 @@ export function detectInjection(text: string, threshold = 0.5): InjectionScan {
     ? 0
     : Math.min(1, maxWeight + (matches.length - 1) * 0.05);
 
-  return { score, matches, flagged: score >= threshold, excerpts };
+  return { score, matches, flagged: score >= threshold, excerpts, truncated };
 }
 
 /**
@@ -150,9 +209,20 @@ export function scanDetail(text: string, scan: InjectionScan): string {
 // ── 2. WRAP ──────────────────────────────────────────────────────────────────
 
 // Any attempt to open or close an untrusted_* tag inside wrapped content —
-// covers closing slashes, embedded whitespace, and the fullwidth "＜" lookalike
-// that fuzzy tag-matching models may still read as a delimiter.
-const TAG_BREAKOUT_RE = /[<＜]\s*\/?\s*untrusted[\w-]*/gi;
+// covers closing slashes, embedded whitespace, zero-width padding, and the
+// fullwidth "＜" lookalike that fuzzy tag-matching models may still read as a
+// delimiter. Same source as the detection pattern; bounded (no ReDoS).
+const TAG_BREAKOUT_RE = new RegExp(TAG_BREAKOUT_SRC, "gi");
+
+/**
+ * Tag-safe form of a wrap label: lowercase [a-z0-9_] only. The label is
+ * interpolated into an XML tag, so anything else ("page>title<script") would
+ * let a caller-supplied label forge markup. Empty labels become "content".
+ */
+export function normalizeLabel(label: string): string {
+  const clean = String(label ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return clean || "content";
+}
 
 /**
  * Neutralize sequences that could terminate (or spoof) an <untrusted_*>
@@ -176,7 +246,7 @@ export function sanitizeUntrusted(content: string): string {
  * @param label     Semantic label, e.g. "page_title", "user_message", "transcript"
  */
 export function wrapUntrusted(content: string, label: string): string {
-  const tag = `untrusted_${label.replace(/\s+/g, "_").toLowerCase()}`;
+  const tag = `untrusted_${normalizeLabel(label)}`;
   const sanitized = sanitizeUntrusted(content);
   if (sanitized !== content) {
     emitShieldEvent({
@@ -281,11 +351,30 @@ type LogHandler = (event: ShieldEvent) => void;
 const logHandlers: LogHandler[] = [];
 
 /**
+ * Events emitted before anyone subscribed. The client wrappers emit their
+ * `shield_started` heartbeat in the constructor; if the app wires its logger a
+ * line later (the natural order), that heartbeat used to vanish and
+ * `shield status` reported "never announced" for a correctly protected app.
+ */
+const RECENT_MAX = 256;
+const recentEvents: ShieldEvent[] = [];
+
+export interface SubscribeOptions {
+  /** Deliver events emitted before this subscription (most recent 256) first. */
+  replay?: boolean;
+}
+
+/**
  * Subscribe to shield events. Returns an unsubscribe function — subscribers
  * that come and go (e.g. the React provider on remount) must call it, or
  * stale handlers accumulate for the life of the process.
  */
-export function onShieldEvent(handler: LogHandler): () => void {
+export function onShieldEvent(handler: LogHandler, opts: SubscribeOptions = {}): () => void {
+  if (opts.replay) {
+    for (const ev of [...recentEvents]) {
+      try { handler(ev); } catch (err) { console.error("[shield] event handler threw during replay; continuing:", err); }
+    }
+  }
   logHandlers.push(handler);
   return () => offShieldEvent(handler);
 }
@@ -298,6 +387,8 @@ export function offShieldEvent(handler: LogHandler): void {
 
 export function emitShieldEvent(event: Omit<ShieldEvent, "timestamp">): void {
   const full: ShieldEvent = { ...event, timestamp: new Date().toISOString() };
+  recentEvents.push(full);
+  if (recentEvents.length > RECENT_MAX) recentEvents.splice(0, recentEvents.length - RECENT_MAX);
   // Iterate a COPY: a handler is allowed to unsubscribe itself or another
   // handler (the React provider does exactly this on unmount), and splicing the
   // live array mid-iteration makes `for..of` skip the following handler. For a
@@ -409,16 +500,24 @@ export function gateUserMessage(
 
 // ── UTILS ────────────────────────────────────────────────────────────────────
 
-// Random per-process salt: without it the canary is djb2(base prompt), which
-// anyone who knows the (often public-ish) system prompt can reproduce and then
-// deliberately avoid or spoof. Stable within a process so hardened prompts
-// stay prompt-cache-friendly and canary alerts don't churn between calls.
+// Random per-process salt: without it the canary is a hash of the base prompt,
+// which anyone who knows the (often public-ish) system prompt can reproduce
+// and then deliberately avoid or spoof. Stable within a process so hardened
+// prompts stay prompt-cache-friendly and canary alerts don't churn between
+// calls.
 //
-// CSPRNG only — the old Math.random() fallback produced a predictable salt,
-// and a protection that silently arms itself with a guessable secret is worse
-// than one that fails loudly (the wearabLLM lesson, secret edition). Every
-// supported runtime (Node ≥18, all evergreen browsers) has globalThis.crypto.
+// SHIELD_CANARY_SALT pins the salt across processes — set it (from a secret
+// store) on horizontally scaled deployments, or every worker/lambda instance
+// produces a different system-prompt suffix and defeats prompt caching.
+//
+// CSPRNG only — a Math.random() fallback produced a predictable salt, and a
+// protection that silently arms itself with a guessable secret is worse than
+// one that fails loudly. Resolved lazily so importing the package never throws;
+// the first hardenSystemPrompt / generateCanary call does, if it must.
 function strongSalt(): string {
+  const env = typeof process !== "undefined" && process.env ? process.env["SHIELD_CANARY_SALT"] : undefined;
+  if (env && env.length >= 16) return env;
+  if (env) throw new Error("[shield] SHIELD_CANARY_SALT must be at least 16 characters.");
   const c = globalThis.crypto;
   if (c?.randomUUID) return c.randomUUID();
   if (c?.getRandomValues) {
@@ -426,22 +525,34 @@ function strongSalt(): string {
     return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
   }
   throw new Error(
-    "[shield] No cryptographically secure RNG available (crypto.randomUUID / crypto.getRandomValues) — refusing to arm a guessable canary salt.",
+    "[shield] No cryptographically secure RNG available (crypto.randomUUID / crypto.getRandomValues) — refusing to arm a guessable canary salt. Node >= 20 or set SHIELD_CANARY_SALT.",
   );
 }
-const CANARY_SALT: string = strongSalt();
+let canarySalt: string | null = null;
+function getCanarySalt(): string {
+  if (canarySalt === null) canarySalt = strongSalt();
+  return canarySalt;
+}
+
+function hash32(input: string, seed: number): number {
+  // FNV-1a-style mixing over UTF-16 code units — no crypto dependency needed.
+  let h = seed >>> 0;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h;
+}
 
 /**
  * Canary token for a given system prompt: deterministic within this process
- * (same base → same token), unguessable across processes.
+ * (same base → same token), unguessable across processes. 64 bits rendered as
+ * base-36 (`SHLD-` + 13 chars) so the normalized leak check
+ * (case/punctuation-insensitive) can't collide with ordinary output.
  */
 export function generateCanary(seed: string): string {
-  // djb2-style hash → base-36 suffix — no crypto dependency needed
-  const input = CANARY_SALT + seed;
-  let h = 5381;
-  for (let i = 0; i < input.length; i++) {
-    h = ((h << 5) + h) ^ input.charCodeAt(i);
-    h = h >>> 0; // keep unsigned 32-bit
-  }
-  return `SHLD-${h.toString(36).toUpperCase().padStart(6, "0")}`;
+  const input = getCanarySalt() + " " + seed;
+  const a = hash32(input, 0x811c9dc5).toString(36).padStart(7, "0");
+  const b = hash32(input, 0x9747b28c).toString(36).padStart(7, "0");
+  return `SHLD-${(a + b).slice(0, 13).toUpperCase()}`;
 }

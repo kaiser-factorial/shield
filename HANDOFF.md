@@ -1,6 +1,35 @@
 # shield handoff
 
-**State as of 2026-07-04:** v1.4.0. Monorepo (TS at root, Python under
+**State as of 2026-09-10:** v1.5.0. See `docs/REVIEW-2026-09.md` for the
+review that drove this release and for what's still open (the output-side
+pipeline and the `createShield(config)` instance API from §2/§4 of that doc).
+
+**v1.5.0 (review fixes):** two detection regexes were quadratic on
+whitespace (`system-colon`, `untrusted-tag-breakout`) — 40k newlines took
+31 s in Python; all patterns are now bounded and inputs > 512 KB are
+head/tail-scanned (`truncated`). Input is NFKC-normalized with zero-width
+chars stripped and letter-spaced words rejoined before matching; four
+patterns added (`encode-above`, `chat-delimiter-spoof`,
+`markdown-image-exfil`, `exfil-send-to`) and three everyday phrasings
+(`act-as`, `roleplay-as`, `what-is-your-system`) dropped below the
+threshold — 30 patterns. Event durability: the bus keeps a replay buffer,
+the file sink writes synchronously (`process.getBuiltinModule`), wrappers
+attach it themselves, `SHIELD_LOG_DIR` overrides the location, home dir
+comes from `os.homedir()`, and `readEvents` skips malformed lines. Python
+gained the same bus (`on_event`/`off_event`/`read_events`). Wrappers are
+rebuilt on a deny-by-default proxy: `parse`/`stream`/`runTools`, the OpenAI
+Responses API, Anthropic `document` blocks, and Python async clients are
+covered; anything else that could carry a prompt throws
+`ShieldCoverageError` unless opted out via `passthrough`. New
+`shieldAnthropic`/`shieldOpenAI` (`shield_*` in Python) return the input
+type. Canary is 64-bit base-36, `SHIELD_CANARY_SALT` / `canary` option pin
+it across workers, and the salt is resolved lazily (import never throws).
+Labels are sanitized, zero-width tag breakouts neutralized, bidi overrides
+stripped in the CLI, timestamps compared as instants, `engines: node>=20`,
+browser export condition, CI matrices, a cross-language version check, and
+the launchd plist is a template.
+
+**Previously (v1.4.0):** Monorepo (TS at root, Python under
 `python/`), both languages at feature parity with test suites in CI. The
 auto-sync cron is gone — syncing is manual and review-first, on purpose.
 
@@ -47,7 +76,7 @@ Consumers need a rebuild / `npm install` to pick this up —
 Prompt-injection defense library for LLM apps. Three-layer model plus
 observability:
 
-1. **DETECT** — 26 weighted regex patterns (`detectInjection` /
+1. **DETECT** — 30 weighted regex patterns (`detectInjection` /
    `detect_injection`). A tripwire, not a gate: trivially bypassed by
    translation/encoding/rephrasing, so callers decide whether to block.
 2. **WRAP** — `wrapUntrusted` tags external content in `<untrusted_*>` XML
@@ -85,21 +114,24 @@ All events from every app (TS + Python) land in `~/.shield/events.jsonl`.
 
 | path | what it is |
 |---|---|
-| `src/shield.ts` | core: patterns, wrap/sanitize, harden/canary, announce, event bus |
+| `src/shield.ts` | core: patterns, normalization, wrap/sanitize, harden/canary, announce, event bus |
+| `src/coverage.ts` | deny-by-default proxy + `ShieldCoverageError` for the wrappers |
+| `src/index.browser.ts` | browser entry (no fs/child_process) — `browser` export condition |
 | `src/client-anthropic.ts` | drop-in Anthropic wrapper (duck-typed, no SDK import) |
-| `src/client-openai.ts` | drop-in OpenAI-compatible wrapper |
+| `src/client-openai.ts` | drop-in OpenAI-compatible wrapper (chat.completions + responses) |
 | `src/logger.ts` | JSONL file logger + `summarizeStatus` (pure, tested) |
 | `src/headless.ts` | automation-process signatures + scanner (`python/shield/headless.py` mirrors) |
 | `src/react.ts` | `ShieldProvider` / `useInjectionScan` hook |
 | `bin/shield-cli.ts` | CLI: `logs`, `status`, `scan`, `clear` |
-| `test/*.test.ts` | node:test suites (32 tests) — `npm test` |
+| `test/*.test.ts` | node:test suites (90 tests) — `npm test` |
 | `python/shield/` | Python port, same API in snake_case |
-| `python/tests/` | unittest suites (26 tests) — `cd python && python3 -m unittest discover -s tests` |
+| `python/tests/` | unittest suites (72 tests) — `cd python && python3 -m unittest discover -s tests` |
 | `~/Projects/shield-sync.sh` | manual sync → group-chat (see below) |
 
 **Parity rule:** every behavior change lands in BOTH languages and both
 test suites, same commit. A test pins `SHIELD_VERSION` to
-package.json/pyproject on each side.
+package.json/pyproject on each side, and `npm run check:versions` (in CI)
+fails if the two sides disagree.
 
 ---
 

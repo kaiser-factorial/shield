@@ -4,13 +4,13 @@ Prompt injection defense library. Plugs into TypeScript and Python apps that cal
 
 ## What it does
 
-**Detect** — 26 regex patterns covering role-hijacking, instruction override, jailbreaks, data exfiltration attempts, indirect injection markers, and untrusted-tag breakout attempts. Returns a severity score, matched patterns, and per-match excerpts (±60 chars of context around what actually tripped each pattern) so flagged events are triageable even when the payload is buried deep in a long page.
+**Detect** — 30 regex patterns covering role-hijacking, instruction override, jailbreaks, system-prompt exposure, chat-delimiter spoofing, exfiltration setup (markdown-image beacons, "send this to…"), indirect injection markers, and untrusted-tag breakout attempts. Input is normalized first (NFKC, zero-width characters stripped, letter-spaced words rejoined) so `ig​nore`, fullwidth `ｉｇｎｏｒｅ`, and `i-g-n-o-r-e` don't slip past. Every pattern is bounded (linear time on adversarial whitespace — see v1.5.0 notes) and inputs over 512 KB are head/tail-scanned with `truncated: true`. Returns a severity score, matched patterns, and per-match excerpts (±60 chars of context, line number, offset) so flagged events are triageable even when the payload is buried deep in a long page. It is a tripwire, not a gate: translation, encoding, and paraphrase still evade it.
 
-**Wrap** — Tags untrusted content (web pages, file uploads, voice transcripts, search results) with `<untrusted_*>` XML boundaries so the model treats it as data, not instructions. Content is sanitized first: any embedded `</untrusted_*>` sequence that could close the boundary early (including case, whitespace, and fullwidth-bracket variants) is neutralized to `&lt;…`, and a `trigger_stripped` event is logged.
+**Wrap** — Tags untrusted content (web pages, file uploads, voice transcripts, search results) with `<untrusted_*>` XML boundaries so the model treats it as data, not instructions. Content is sanitized first: any embedded `</untrusted_*>` sequence that could close the boundary early (including case, whitespace, zero-width padding, and fullwidth-bracket variants) is neutralized to `&lt;…`, and a `trigger_stripped` event is logged. Labels are normalized to `[a-z0-9_]` so a caller-supplied label can't forge markup.
 
-**Harden** — Prepends a stable anti-injection boilerplate and embeds a canary token into the system prompt. If the canary appears in the model's output, an injection likely leaked through. The leak check also catches lightly obfuscated echoes (spacing, dashes, case changes) and — via the client wrappers — runs on **streaming** responses too, as the stream is consumed. The per-process canary salt requires a CSPRNG (`crypto.randomUUID`/`getRandomValues` in TS, `secrets` in Python); shield fails loudly rather than arming a guessable canary. Absence of a leak event is not proof of safety — heavy transformations (base64, translation) still slip through.
+**Harden** — Appends a stable anti-injection boilerplate and embeds a canary token (`SHLD-` + 13 base-36 chars) into the system prompt. If the canary appears in the model's output, an injection likely leaked through. The leak check also catches lightly obfuscated echoes (spacing, dashes, case changes) and — via the client wrappers — runs on **streaming** responses too, as the stream is consumed. The per-process canary salt requires a CSPRNG (`crypto.randomUUID`/`getRandomValues` in TS, `secrets` in Python); shield fails loudly rather than arming a guessable canary. Set `SHIELD_CANARY_SALT` (≥16 chars, from a secret store) on horizontally scaled deployments so every worker produces the same hardened prompt and prompt caching keeps working; or pass `canary` to a wrapper to pin the token outright. Absence of a leak event is not proof of safety — heavy transformations (base64, translation) still slip through.
 
-**Log** — All shield events (detections, canary leaks, blocked messages) write to `~/.shield/events.jsonl`, shared across TS and Python apps. Query with the CLI. The log holds snippets of flagged user content, so the dir/file are created owner-only (`0700`/`0600`; older installs are tightened on first write). The CLI strips terminal control characters from logged text before printing, so a flagged payload can't smuggle ANSI escape codes into your terminal when you review events.
+**Log** — All shield events (detections, canary leaks, blocked messages) go through an in-process event bus (`onShieldEvent` / `on_event`, with `replay` for late subscribers) and, by default, append to `~/.shield/events.jsonl` (override with `SHIELD_LOG_DIR`), shared across TS and Python apps. The client wrappers wire the file sink themselves under Node, writes are synchronous, and events emitted before the sink attached are replayed — so a script that exits right after a detection, or an app that constructs its client before calling `initFileLogger()`, no longer loses events. Query with the CLI. The log holds snippets of flagged user content, so the dir/file are created owner-only (`0700`/`0600`; older installs are tightened on first write). The CLI strips terminal control and bidi-override characters from logged text before printing, so a flagged payload can't smuggle ANSI escape codes into your terminal when you review events.
 
 **Announce** — Client wrappers print a one-line startup banner and emit a `shield_started` heartbeat (with the library version) on construction, so a protected app *visibly says so* — and `shield status` can spot apps that have gone quiet or run a stale copy.
 
@@ -53,13 +53,15 @@ const safe = wrapUntrusted(userSuppliedText, 'web_page');
 ### Drop-in Anthropic client wrapper
 
 ```ts
-import { ShieldAnthropicClient } from '@local/shield';
+import { shieldAnthropic } from '@local/shield';
 import Anthropic from '@anthropic-ai/sdk';
 
-const client = new ShieldAnthropicClient(new Anthropic(), { appLabel: 'my-app' });
-// Use exactly like the Anthropic client — detection, hardening, and canary
-// checks happen automatically on every call.
+const client = shieldAnthropic(new Anthropic(), { appLabel: 'my-app' });
+// `client` has the same TypeScript type as what you passed in. Use it exactly
+// like the Anthropic client — detection, hardening, and canary checks happen
+// automatically on messages.create / parse / stream.
 const msg = await client.messages.create({ ... });
+// (new ShieldAnthropicClient(inner, opts) still works and returns the same proxy.)
 
 // Tool results (fetched pages, file contents, search output) are the main
 // indirect-injection channel in agentic apps, so since v1.3 they are always
@@ -73,19 +75,42 @@ const msg = await client.messages.create({ ... });
 ### Drop-in OpenAI/OpenRouter wrapper
 
 ```ts
-import { ShieldOpenAIClient } from '@local/shield';
+import { shieldOpenAI } from '@local/shield';
 import OpenAI from 'openai';
 
-const client = new ShieldOpenAIClient(new OpenAI(), { appLabel: 'my-app' });
-const completion = await client.chat.completions.create({ ... });
+const client = shieldOpenAI(new OpenAI(), { appLabel: 'my-app' });
+const completion = await client.chat.completions.create({ ... });   // also .parse / .stream / .runTools
+const response = await client.responses.create({ instructions, input }); // Responses API: also .parse / .stream
 ```
+
+### Coverage is deny-by-default
+
+A protection that silently doesn't apply looks exactly like no protection, so
+the wrappers refuse to hand you an unshielded path by accident. Data-only
+surfaces (`models`, `embeddings`, `files`, `messages.countTokens`, …) pass
+through. Anything that could carry a prompt to the model and isn't covered
+(`beta`, legacy `completions`, `messages.batches`, `withOptions`) throws
+`ShieldCoverageError` at access time. Opt a surface out by name if you really
+need it unshielded:
+
+```ts
+shieldOpenAI(new OpenAI(), { passthrough: ['beta'] });
+# Python: shield_openai(OpenAI(), passthrough=["beta"])
+```
+
+Other wrapper options: `wrapUserMessages`, `wrapToolResults` (default on),
+`canary` (pin the token), `fileLogger: false` (don't attach the JSONL sink),
+`announce: false`. Anthropic `document` blocks with inline text are scanned
+too (source qualifier `:document`); Python async clients (`AsyncOpenAI`,
+`AsyncAnthropic`) are canary-checked as well.
 
 ### File logger (Node.js)
 
 ```ts
-import { initFileLogger } from '@local/shield';
+import { initFileLogger, onShieldEvent } from '@local/shield';
 
-initFileLogger(); // call once at startup — wires events → ~/.shield/events.jsonl
+await initFileLogger(); // wires events → ~/.shield/events.jsonl (wrappers do this for you)
+onShieldEvent((ev) => myLogger.warn(ev), { replay: true }); // or route them anywhere
 ```
 
 ### React hook
@@ -107,10 +132,11 @@ function MessageInput() {
 ## Python usage
 
 ```python
-from shield import ShieldAnthropicClient, detect_injection, wrap_untrusted, harden_system_prompt
+from shield import shield_anthropic, shield_openai, detect_injection, wrap_untrusted, harden_system_prompt, on_event
 import anthropic
 
-client = ShieldAnthropicClient(anthropic.Anthropic(), app_label="my-app")
+client = shield_anthropic(anthropic.Anthropic(), app_label="my-app")   # or ShieldAnthropicClient(...)
+on_event(lambda ev: my_logger.warning(ev), replay=True)                  # optional: route events yourself
 
 prompt, canary = harden_system_prompt(BASE_PROMPT)
 scan = detect_injection(user_text)
@@ -138,11 +164,12 @@ npx shield clear
 `--notify` posts a macOS notification (with sound) for each new detection. For always-on coverage, install the LaunchAgent — it survives reboots, polls every 30s, notifies, and appends to `~/.shield/headless-watch.log`:
 
 ```bash
-cp launchd/com.shield.headless-watch.plist ~/Library/LaunchAgents/
+sed -e "s|__NODE__|$(which node)|g" -e "s|__SHIELD_REPO__|$PWD|g" -e "s|__HOME__|$HOME|g" \
+    launchd/com.shield.headless-watch.plist > ~/Library/LaunchAgents/com.shield.headless-watch.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.shield.headless-watch.plist
 ```
 
-It's read-only monitoring (scans `ps`, writes events, executes nothing it finds) — safe to run permanently, unlike the auto-sync cron this repo removed. Uninstall with `launchctl bootout gui/$(id -u)/com.shield.headless-watch`. Note: the plist hardcodes the node and repo paths — edit if either moves.
+It's read-only monitoring (scans `ps`, writes events, executes nothing it finds) — safe to run permanently, unlike the auto-sync cron this repo removed. Uninstall with `launchctl bootout gui/$(id -u)/com.shield.headless-watch`. Note: the plist is a template; re-run the `sed` if node or the repo moves.
 
 ## Knowing shield is on — banners, heartbeats, `shield status`
 
@@ -151,7 +178,7 @@ Lesson learned the hard way (wearabLLM shipped with a broken import path for mon
 **1. Startup banner + heartbeat (automatic).** Constructing `ShieldAnthropicClient` / `ShieldOpenAIClient` prints once per process:
 
 ```
-[shield] v1.3.0 active · app=bulwork · 26 patterns · canary armed · wrap=off
+[shield] v1.5.0 active · app=bulwork · 30 patterns · canary armed · wrap=off
 ```
 
 …and emits a `shield_started` heartbeat event to the shared log. Apps using the lower-level primitives directly should call `announceShield({ appLabel })` / `announce_shield(app_label)` at startup. Pass `announce: false` or set `SHIELD_QUIET=1` to silence the banner — the heartbeat always fires. Get used to seeing the banner; its absence means shield didn't load.
@@ -191,7 +218,7 @@ npm test
 cd python && python3 -m unittest discover -s tests -v
 ```
 
-When adding a detection pattern or changing wrapping/hardening behavior, change **both** packages and both test suites — they are kept in feature parity by hand. Both live in this repo (TypeScript at the root, Python under `python/`) so one commit covers both sides.
+When adding a detection pattern or changing wrapping/hardening behavior, change **both** packages and both test suites — they are kept in feature parity by hand, and CI fails if `package.json`, `pyproject.toml`, and the two `SHIELD_VERSION` constants disagree (`npm run check:versions`). Both live in this repo (TypeScript at the root, Python under `python/`) so one commit covers both sides.
 
 ## Event log
 
@@ -204,9 +231,18 @@ All events share `~/.shield/events.jsonl` — Python and TypeScript apps write t
   "source": "bulwork",                  // app label; ":tool_result" qualifier when the hit came via a tool result
   "score": 0.9,                         // 0–1 risk score (injection events)
   "patterns": ["ignore-instructions"],  // matched pattern labels
-  "detail": "[ignore-instructions] …context around the match…"  // ±60 chars around each match, capped at 200
+  "detail": "[ignore-instructions @L12] \"…context around the match…\""  // ±60 chars around each match, capped at 300
 }
 ```
+
+Environment variables: `SHIELD_LOG_DIR` (log location), `SHIELD_CANARY_SALT`
+(stable canaries across processes), `SHIELD_QUIET` (no banner).
+
+## Requirements
+
+Node ≥ 20 (`globalThis.crypto`; synchronous log writes need ≥ 20.16) or any
+evergreen browser via the `browser` export condition / `@local/shield/browser`.
+Python ≥ 3.10. Zero runtime dependencies on either side.
 
 ## Apps wired up
 

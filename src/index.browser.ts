@@ -1,12 +1,17 @@
-// Core detection, wrapping, hardening
+/**
+ * Browser entry point — selected by bundlers via the "browser" export
+ * condition. Same core API as the main entry, minus the Node-only modules
+ * (file logger, process watch, child_process) so nothing here references
+ * `fs`, `os`, or `child_process`.
+ */
 export {
   SHIELD_VERSION,
   PATTERN_COUNT,
+  MAX_SCAN_CHARS,
   announceShield,
   type AnnounceOptions,
   detectInjection,
   normalizeForScan,
-  MAX_SCAN_CHARS,
   scanDetail,
   sanitizeUntrusted,
   normalizeLabel,
@@ -28,17 +33,6 @@ export {
   type SubscribeOptions,
 } from "./shield.js";
 
-// Headless-browser / automation watch (Node.js only)
-export {
-  HEADLESS_SIGNATURES,
-  matchHeadless,
-  scanHeadlessProcesses,
-  reportHeadless,
-  type HeadlessSignature,
-  type HeadlessProcess,
-} from "./headless.js";
-
-// SDK wrappers
 export {
   shieldAnthropic,
   ShieldAnthropicClient,
@@ -55,14 +49,3 @@ export {
   type OpenAIResponsesLike,
 } from "./client-openai.js";
 export { ShieldCoverageError } from "./coverage.js";
-
-// File logger (Node.js only — no-ops in browser)
-export {
-  initFileLogger,
-  readEvents,
-  summarizeStatus,
-  sanitizeForTerminal,
-  LOG_FILE,
-  type ReadEventsOptions,
-  type AppStatus,
-} from "./logger.js";

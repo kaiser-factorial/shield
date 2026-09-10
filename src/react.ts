@@ -13,7 +13,7 @@
 
 // This file uses React but declares it as a peer dep so the package stays lean.
 // The importing app must have React installed.
-import { useState, useEffect, useCallback, createContext, useContext, createElement, type ReactNode } from "react";
+import { useState, useEffect, useCallback, useMemo, createContext, useContext, createElement, type ReactNode } from "react";
 import { onShieldEvent, detectInjection, wrapUntrusted, type ShieldEvent, type InjectionScan } from "./shield.js";
 
 export interface ShieldContextValue {
@@ -48,7 +48,10 @@ export function ShieldProvider({ children, maxEvents = 500 }: { children: ReactN
   const wrap = useCallback((content: string, label: string) => wrapUntrusted(content, label), []);
   const clearEvents = useCallback(() => setEvents([]), []);
 
-  return createElement(ShieldContext.Provider, { value: { events, scan, wrap, clearEvents } }, children);
+  // Memoize so consumers only re-render when events actually change, not on
+  // every render of whatever happens to contain the provider.
+  const value = useMemo(() => ({ events, scan, wrap, clearEvents }), [events, scan, wrap, clearEvents]);
+  return createElement(ShieldContext.Provider, { value }, children);
 }
 
 export function useShield(): ShieldContextValue {

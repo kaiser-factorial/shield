@@ -7,18 +7,30 @@ import os
 import re
 import secrets
 
-from .detect import _PATTERNS
+from .detect import _PATTERNS, TAG_BREAKOUT_SRC
 from .logger import emit_event
 
 # Library version — keep in sync with pyproject.toml and the TypeScript
 # SHIELD_VERSION (a test enforces the pyproject half). Announced in startup
 # banners and heartbeat events so `shield status` can flag stale apps.
-SHIELD_VERSION = "1.4.1"
+SHIELD_VERSION = "1.5.0"
 
 # Any attempt to open or close an untrusted_* tag inside wrapped content —
-# covers closing slashes, embedded whitespace, and the fullwidth "＜" lookalike
-# that fuzzy tag-matching models may still read as a delimiter.
-_TAG_BREAKOUT_RE = re.compile(r"[<＜]\s*/?\s*untrusted[\w-]*", re.I)
+# covers closing slashes, embedded whitespace, zero-width padding, and the
+# fullwidth "＜" lookalike. Same source as the detection pattern; bounded.
+_TAG_BREAKOUT_RE = re.compile(TAG_BREAKOUT_SRC, re.I)
+
+_LABEL_RE = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_label(label: str) -> str:
+    """
+    Tag-safe form of a wrap label: lowercase [a-z0-9_] only. The label is
+    interpolated into an XML tag, so anything else ("page>title<script")
+    would let a caller-supplied label forge markup. Empty labels → "content".
+    """
+    clean = _LABEL_RE.sub("_", str(label or "").lower()).strip("_")
+    return clean or "content"
 
 
 def sanitize_untrusted(content: str) -> str:
@@ -38,31 +50,75 @@ def wrap_untrusted(content: str, label: str) -> str:
     `</untrusted_voice_transcript>` would close the boundary early and
     everything after it would sit outside the untrusted block.
     """
-    tag = f"untrusted_{label.lower().replace(' ', '_')}"
+    tag = f"untrusted_{normalize_label(label)}"
     sanitized = sanitize_untrusted(content)
     if sanitized != content:
         emit_event("trigger_stripped", source=f"wrap:{tag}", detail=content[:200])
     return f"<{tag}>\n{sanitized}\n</{tag}>"
 
 
-def _djb2(s: str) -> int:
-    h = 5381
-    for c in s:
-        h = ((h << 5) + h) ^ ord(c)
-        h &= 0xFFFFFFFF
+def _hash32(s: str, seed: int) -> int:
+    # FNV-1a-style mixing over UTF-16 code units (parity with the TS side).
+    h = seed & 0xFFFFFFFF
+    for unit in _utf16_units(s):
+        h ^= unit
+        h = (h * 16777619) & 0xFFFFFFFF
     return h
 
 
-# Random per-process salt: without it the canary is djb2(base prompt), which
-# anyone who knows the (often public-ish) system prompt can reproduce and then
-# deliberately avoid or spoof. Stable within a process so hardened prompts
-# stay prompt-cache-friendly and canary alerts don't churn between calls.
-_CANARY_SALT = secrets.token_hex(8)
+def _utf16_units(s: str):
+    b = s.encode("utf-16-le")
+    for i in range(0, len(b), 2):
+        yield b[i] | (b[i + 1] << 8)
+
+
+_B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def _base36(n: int) -> str:
+    if n == 0:
+        return "0"
+    out = []
+    while n:
+        n, r = divmod(n, 36)
+        out.append(_B36[r])
+    return "".join(reversed(out))
+
+
+# Random per-process salt: without it the canary is a hash of the base prompt,
+# which anyone who knows the (often public-ish) system prompt can reproduce
+# and then deliberately avoid or spoof. Stable within a process so hardened
+# prompts stay prompt-cache-friendly.
+#
+# SHIELD_CANARY_SALT pins the salt across processes — set it (from a secret
+# store) on horizontally scaled deployments, or every worker produces a
+# different system-prompt suffix and defeats prompt caching.
+_canary_salt: str | None = None
+
+
+def _get_canary_salt() -> str:
+    global _canary_salt
+    if _canary_salt is None:
+        env = os.environ.get("SHIELD_CANARY_SALT")
+        if env:
+            if len(env) < 16:
+                raise ValueError("[shield] SHIELD_CANARY_SALT must be at least 16 characters.")
+            _canary_salt = env
+        else:
+            _canary_salt = secrets.token_hex(16)
+    return _canary_salt
 
 
 def generate_canary(seed: str) -> str:
-    """Deterministic within this process (same seed → same token), unguessable across processes."""
-    return f"SHLD-{_djb2(_CANARY_SALT + seed):06X}"
+    """
+    Deterministic within this process (same seed → same token), unguessable
+    across processes. 64 bits rendered as base-36 (`SHLD-` + 13 chars) so the
+    normalized leak check can't collide with ordinary output.
+    """
+    inp = _get_canary_salt() + " " + seed
+    a = _base36(_hash32(inp, 0x811C9DC5)).rjust(7, "0")
+    b = _base36(_hash32(inp, 0x9747B28C)).rjust(7, "0")
+    return f"SHLD-{(a + b)[:13].upper()}"
 
 
 ANTI_INJECTION_BOILERPLATE = """

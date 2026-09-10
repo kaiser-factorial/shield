@@ -6,11 +6,17 @@
  *
  * Usage:
  *   import Anthropic from "@anthropic-ai/sdk";
- *   import { ShieldAnthropicClient } from "@local/shield";
- *   const client = new ShieldAnthropicClient(new Anthropic());
+ *   import { shieldAnthropic } from "@local/shield";
+ *   const client = shieldAnthropic(new Anthropic(), { appLabel: "my-app" });
  *
- *   // Then use exactly as before:
+ *   // Then use exactly as before — the return type is the type you passed in:
  *   const res = await client.messages.create({ ... });
+ *
+ * Coverage is deny-by-default (see coverage.ts): `messages.create/parse/
+ * stream` are shielded, `messages.countTokens` and `models` pass through, and
+ * anything else that could carry a prompt to the model (`beta`, `completions`,
+ * `messages.batches`, `withOptions`) throws ShieldCoverageError unless you
+ * list it in `passthrough`.
  */
 
 import {
@@ -25,20 +31,28 @@ import {
   wrapUntrusted,
 } from "./shield.js";
 import { tapEventStream } from "./stream.js";
+import { guarded, nestedPassthrough } from "./coverage.js";
+import { initFileLogger } from "./logger.js";
 
 // Structural interface — matches the Anthropic SDK without importing it
-interface AnthropicMessages {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  create(params: any): Promise<any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  parse?(params: any): Promise<any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  stream?(params: any): any;
+/* eslint-disable @typescript-eslint/no-explicit-any */
+export interface AnthropicMessagesLike {
+  create(params: any, options?: any): Promise<any>;
+  parse?(params: any, options?: any): Promise<any>;
+  stream?(params: any, options?: any): any;
+  countTokens?(params: any, options?: any): Promise<any>;
 }
 
-interface AnthropicLike {
-  messages: AnthropicMessages;
+export interface AnthropicLike {
+  messages: AnthropicMessagesLike;
 }
+
+/** The messages surface as seen through the wrapper: covered methods are always present. */
+export interface ShieldedAnthropicMessages extends AnthropicMessagesLike {
+  parse(params: any, options?: any): Promise<any>;
+  stream(params: any, options?: any): any;
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
 
 export interface ShieldAnthropicOptions {
   /** Wrap user message content in <untrusted_user_message> blocks.
@@ -54,14 +68,31 @@ export interface ShieldAnthropicOptions {
   /** Print the startup banner (default true). The shield_started heartbeat
    *  event is emitted either way. */
   announce?: boolean;
+  /** Fixed canary token. By default one is derived per system prompt from a
+   *  per-process salt (or SHIELD_CANARY_SALT). Pin it when you need identical
+   *  system prompts across workers for prompt caching. */
+  canary?: string;
+  /** SDK surfaces to forward WITHOUT shielding, by path relative to the client
+   *  ("beta", "messages.batches"). Accessing any uncovered surface not listed
+   *  here throws ShieldCoverageError — deliberately, so an unprotected call
+   *  path can't hide behind the startup banner. */
+  passthrough?: string[];
+  /** Wire the shared JSONL file log on construction when running under Node
+   *  (default true). Set false if you route events elsewhere via onShieldEvent. */
+  fileLogger?: boolean;
 }
+
+// Client-level attributes that never carry a prompt to the model.
+const CLIENT_ALLOW = ["models", "apiKey", "authToken", "baseURL", "timeout", "maxRetries", "fetch", "idempotencyHeader"] as const;
+// messages.* attributes that never carry a prompt to the model.
+const MESSAGES_ALLOW = ["countTokens"] as const;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractText(content: any): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
-      .filter((b: { type: string }) => b.type === "text")
+      .filter((b: { type: string }) => b && b.type === "text")
       .map((b: { text: string }) => b.text)
       .join(" ");
   }
@@ -82,6 +113,20 @@ function extractToolResultText(content: any): string {
     .filter((b) => b && b.type === "tool_result")
     .map((b) => (typeof b.content === "string" ? b.content : extractText(b.content)))
     .filter(Boolean)
+    .join(" ");
+}
+
+/**
+ * Text carried by `document` blocks with an inline text source. Uploaded
+ * files and pasted documents are external content in exactly the same way
+ * tool results are; before v1.5 they were never scanned.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractDocumentText(content: any): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((b) => b && b.type === "document" && b.source && b.source.type === "text" && typeof b.source.data === "string")
+    .map((b) => b.source.data as string)
     .join(" ");
 }
 
@@ -116,14 +161,13 @@ function wrapToolResultBlocks(content: any): any {
  * Harden a `system` param of any legal shape.
  * - string (or absent): append boilerplate as before.
  * - array of blocks: append the boilerplate as a NEW text block so existing
- *   blocks — including cache_control markers — are preserved. (Previously an
- *   array-form system prompt was silently replaced with just the boilerplate.)
+ *   blocks — including cache_control markers — are preserved.
  * - anything else: pass through untouched rather than destroy it.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function hardenSystemParam(system: any): { system: any; canary: string } {
+function hardenSystemParam(system: any, fixedCanary?: string): { system: any; canary: string } {
   if (system == null || typeof system === "string") {
-    const { prompt, canary } = hardenSystemPrompt(typeof system === "string" ? system : "");
+    const { prompt, canary } = hardenSystemPrompt(typeof system === "string" ? system : "", fixedCanary);
     return { system: prompt, canary };
   }
   if (Array.isArray(system)) {
@@ -131,16 +175,14 @@ function hardenSystemParam(system: any): { system: any; canary: string } {
       .filter((b) => b && b.type === "text" && typeof b.text === "string")
       .map((b) => b.text)
       .join("\n");
-    const canary = generateCanary(seed);
+    const canary = fixedCanary ?? generateCanary(seed);
     return { system: [...system, { type: "text", text: securityBoilerplate(canary) }], canary };
   }
-  return { system, canary: generateCanary(String(system)) };
+  return { system, canary: fixedCanary ?? generateCanary(String(system)) };
 }
 
 /**
  * Wrap the text of a user message while PRESERVING non-text blocks.
- * (Previously the whole content array was flattened to a single wrapped
- * string, destroying images and tool_result blocks.)
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function wrapUserContent(content: any): any {
@@ -163,70 +205,60 @@ function anthropicDeltaText(ev: any): string {
     : "";
 }
 
-export class ShieldAnthropicClient {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function responseText(response: any): string {
+  if (response && typeof response === "object" && Array.isArray(response.content)) {
+    return response.content
+      .filter((b: { type: string }) => b && b.type === "text")
+      .map((b: { text: string }) => b.text ?? "")
+      .join("");
+  }
+  return "";
+}
+
+class AnthropicShield {
   constructor(
     private readonly inner: AnthropicLike,
-    private readonly opts: ShieldAnthropicOptions = {},
-  ) {
-    announceShield({
-      appLabel: opts.appLabel,
-      banner: opts.announce,
-      wrapUserMessages: opts.wrapUserMessages,
-    });
+    private readonly opts: ShieldAnthropicOptions,
+  ) {}
+
+  private get appLabel(): string {
+    return this.opts.appLabel ?? "shield";
   }
 
-  get messages() {
-    // eslint-disable-next-line @typescript-eslint/no-this-alias
-    const self = this;
-    return {
-      create: (params: Record<string, unknown>) => self._create(params),
-      parse: (params: Record<string, unknown>) => self._parse(params),
-      stream: (params: Record<string, unknown>) => self._stream(params),
-    };
+  private scanAndEmit(text: string, source: string): void {
+    if (!text) return;
+    const scan = detectInjection(text);
+    if (scan.flagged) {
+      emitShieldEvent({
+        type: "injection_detected",
+        source,
+        detail: scanDetail(text, scan),
+        score: scan.score,
+        patterns: scan.matches,
+      });
+    }
   }
 
-  private _checkCanaryText(outputText: string, canary: string): void {
+  checkCanaryText(outputText: string, canary: string): void {
     if (!outputText || !outputLeakedCanary(outputText, canary)) return;
-    const appLabel = this.opts.appLabel ?? "shield";
-    emitShieldEvent({ type: "canary_leaked", source: appLabel, detail: outputText.slice(0, 200) });
-    console.warn(`[shield] Canary leak detected in response from ${appLabel}`);
+    emitShieldEvent({ type: "canary_leaked", source: this.appLabel, detail: outputText.slice(0, 200) });
+    console.warn(`[shield] Canary leak detected in response from ${this.appLabel}`);
   }
 
-  private _prepare(params: Record<string, unknown>): { prepared: Record<string, unknown>; canary: string } {
-    const appLabel = this.opts.appLabel ?? "shield";
-    const { system: hardenedSystem, canary } = hardenSystemParam(params["system"]);
+  prepare(params: Record<string, unknown>): { prepared: Record<string, unknown>; canary: string } {
+    const appLabel = this.appLabel;
+    const { system: hardenedSystem, canary } = hardenSystemParam(params["system"], this.opts.canary);
 
     const rawMessages = (params["messages"] as Array<Record<string, unknown>>) ?? [];
     const messages = rawMessages.map((m) => {
-      if (m["role"] !== "user") return m;
-      const text = extractText(m["content"]);
-      const scan = detectInjection(text);
-      if (scan.flagged) {
-        emitShieldEvent({
-          type: "injection_detected",
-          source: appLabel,
-          detail: scanDetail(text, scan),
-          score: scan.score,
-          patterns: scan.matches,
-        });
-      }
-
-      // Tool results carry external content (fetched pages, files, search
-      // output) — scan them always, with a source qualifier so `shield logs`
-      // shows where the injection came in.
-      const toolText = extractToolResultText(m["content"]);
-      if (toolText) {
-        const toolScan = detectInjection(toolText);
-        if (toolScan.flagged) {
-          emitShieldEvent({
-            type: "injection_detected",
-            source: `${appLabel}:tool_result`,
-            detail: scanDetail(toolText, toolScan),
-            score: toolScan.score,
-            patterns: toolScan.matches,
-          });
-        }
-      }
+      if (!m || m["role"] !== "user") return m;
+      this.scanAndEmit(extractText(m["content"]), appLabel);
+      // Tool results and documents carry external content (fetched pages,
+      // files, search output) — scan them always, with a source qualifier so
+      // `shield logs` shows where the injection came in.
+      this.scanAndEmit(extractToolResultText(m["content"]), `${appLabel}:tool_result`);
+      this.scanAndEmit(extractDocumentText(m["content"]), `${appLabel}:document`);
 
       let content = m["content"];
       if (this.opts.wrapToolResults !== false) content = wrapToolResultBlocks(content);
@@ -237,39 +269,25 @@ export class ShieldAnthropicClient {
     return { prepared: { ...params, system: hardenedSystem, messages }, canary };
   }
 
-  private async _create(params: Record<string, unknown>) {
-    const { prepared, canary } = this._prepare(params);
-    const response = await this.inner.messages.create(prepared);
+  async create(params: Record<string, unknown>, options?: unknown) {
+    const { prepared, canary } = this.prepare(params);
+    const response = await this.inner.messages.create(prepared, options);
 
-    if (response && typeof response === "object" && "content" in response && Array.isArray(response.content)) {
-      const outputText = response.content
-        .filter((b: { type: string }) => b.type === "text")
-        .map((b: { type: string; text: string }) => b.text)
-        .join("");
-      this._checkCanaryText(outputText, canary);
-    } else if (params["stream"] === true) {
+    if (params["stream"] === true && !(response && typeof response === "object" && "content" in response)) {
       // create({stream: true}) returns a raw event stream — tap it so the
-      // canary check runs as the caller consumes it (previously unchecked).
-      return tapEventStream(response, anthropicDeltaText, (text) => this._checkCanaryText(text, canary));
+      // canary check runs as the caller consumes it.
+      return tapEventStream(response, anthropicDeltaText, (text) => this.checkCanaryText(text, canary));
     }
-
+    this.checkCanaryText(responseText(response), canary);
     return response;
   }
 
-  private async _parse(params: Record<string, unknown>) {
-    const { prepared, canary } = this._prepare(params);
+  async parse(params: Record<string, unknown>, options?: unknown) {
+    const { prepared, canary } = this.prepare(params);
     const parseFn = this.inner.messages.parse;
     if (!parseFn) throw new Error("This Anthropic client does not support messages.parse");
-    const response = await parseFn.call(this.inner.messages, prepared);
-
-    if (response && typeof response === "object" && "content" in response && Array.isArray(response.content)) {
-      const outputText = response.content
-        .filter((b: { type: string }) => b.type === "text")
-        .map((b: { type: string; text: string }) => b.text)
-        .join("");
-      this._checkCanaryText(outputText, canary);
-    }
-
+    const response = await parseFn.call(this.inner.messages, prepared, options);
+    this.checkCanaryText(responseText(response), canary);
     return response;
   }
 
@@ -278,21 +296,68 @@ export class ShieldAnthropicClient {
    * the canary on the streamed text. The SDK's MessageStream emits "text"
    * events as the caller consumes it, so this buffers nothing extra.
    */
-  private _stream(params: Record<string, unknown>) {
-    const { prepared, canary } = this._prepare(params);
+  stream(params: Record<string, unknown>, options?: unknown) {
+    const { prepared, canary } = this.prepare(params);
     const streamFn = this.inner.messages.stream;
     if (!streamFn) throw new Error("This Anthropic client does not support messages.stream");
-    const stream = streamFn.call(this.inner.messages, prepared);
+    const stream = streamFn.call(this.inner.messages, prepared, options);
 
     try {
       if (stream && typeof stream.on === "function") {
         let buf = "";
         stream.on("text", (t: string) => { buf += t; });
-        stream.on("end", () => this._checkCanaryText(buf, canary));
+        stream.on("end", () => this.checkCanaryText(buf, canary));
         return stream;
       }
     } catch { /* canary observation must never break streaming */ }
     // Not an event emitter (unusual client): fall back to tapping iteration.
-    return tapEventStream(stream, anthropicDeltaText, (text) => this._checkCanaryText(text, canary));
+    return tapEventStream(stream, anthropicDeltaText, (text) => this.checkCanaryText(text, canary));
+  }
+}
+
+/**
+ * Wrap an Anthropic client. Returns a proxy typed as the client you passed
+ * in, so existing call sites type-check unchanged.
+ */
+export function shieldAnthropic<T extends AnthropicLike>(inner: T, opts: ShieldAnthropicOptions = {}): T {
+  announceShield({
+    appLabel: opts.appLabel,
+    banner: opts.announce,
+    wrapUserMessages: opts.wrapUserMessages,
+  });
+  if (opts.fileLogger !== false) void initFileLogger();
+
+  const shield = new AnthropicShield(inner, opts);
+  const passthrough = opts.passthrough ?? [];
+
+  return guarded(inner, {
+    path: "client",
+    allow: CLIENT_ALLOW,
+    passthrough,
+    intercept: {
+      messages: (client: AnthropicLike) =>
+        guarded(client.messages, {
+          path: "client.messages",
+          allow: MESSAGES_ALLOW,
+          passthrough: nestedPassthrough(passthrough, "messages"),
+          intercept: {
+            create: () => (params: Record<string, unknown>, options?: unknown) => shield.create(params, options),
+            parse: () => (params: Record<string, unknown>, options?: unknown) => shield.parse(params, options),
+            stream: () => (params: Record<string, unknown>, options?: unknown) => shield.stream(params, options),
+          },
+        }),
+    },
+  });
+}
+
+/**
+ * Class form of shieldAnthropic, kept for existing consumers:
+ *   const client = new ShieldAnthropicClient(new Anthropic(), { appLabel });
+ * The constructor returns the same proxy `shieldAnthropic` does.
+ */
+export class ShieldAnthropicClient implements AnthropicLike {
+  declare readonly messages: ShieldedAnthropicMessages;
+  constructor(inner: AnthropicLike, opts: ShieldAnthropicOptions = {}) {
+    return shieldAnthropic(inner, opts) as unknown as ShieldAnthropicClient;
   }
 }
