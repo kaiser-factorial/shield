@@ -1,8 +1,13 @@
 # shield handoff
 
-**State as of 2026-09-11:** v1.7.0. The review's three detection items
-shipped (detector slot, refusal telemetry, detection benchmark); the
-outstanding list below is what remains.
+**State as of 2026-09-11:** v1.8.0. Every code item from the September review
+has now shipped. What remains needs a decision from you (package names) or is
+not code (docs playbook, connected-surface audit).
+
+**v1.8.0 (enforcement gaps):** raw-stream tool-call evaluation, per-tool
+argument schemas, document wrapping plus a `content_not_scanned` signal, and
+lint + type-check in CI. Files: `src/stream.ts`, `python/shield/stream_tools.py`,
+`src/output.ts`, `python/shield/output.py`, `eslint.config.js`.
 
 **v1.7.0 (detectors + benchmark):** a pluggable `Detector` slot behind the
 scans, a `refusal` output category, and a committed precision/recall floor
@@ -201,13 +206,15 @@ exactly like no protection.* Hence banners + heartbeats + central status.
 
 ## pending / immediate next steps
 
-1. **Consumers need a rebuild for v1.7.0** — bulwork / voicelogger-cli
+1. **Consumers need a rebuild for v1.8.0** — bulwork / voicelogger-cli
    (`npm install` + build), group-chat (`shield-sync.sh`), wearabLLM (live
    import, nothing to do). `shield status` flags anything still on an older version.
    Once rebuilt, pass a `createShield({...})` instance with each app's
    `secrets`, `output.allowedHosts` and `toolPolicy` — the defaults scan
    but gate nothing (no policy ⇒ every tool call allowed, no allow-list ⇒
-   plain links aren't findings).
+   plain links aren't findings). Streaming callers should also catch
+   `ShieldBlockedToolError` if they turn on `enforceToolPolicy` — that is
+   the one behaviour change in v1.8.0 that a caller can notice.
 2. **Run bulwork and voicelogger once** after rebuilding — heartbeats fire
    at app startup, so `shield status` shows "never announced" until then.
 3. Optional: add `npx shield status` to shell profile for a login-time
@@ -248,23 +255,47 @@ exactly like no protection.* Hence banners + heartbeats + central status.
 
 ---
 
-## outstanding (from the September review, not yet done)
+## shipped in v1.8.0
 
-- **Per-tool argument schemas** — `ToolPolicy` matches arguments by regex;
-  a per-tool JSON-schema (or validator fn) would be stronger for
-  path/URL/shell arguments.
-- **Raw-stream tool calls are never evaluated** — the larger half of this
-  gap. On the helper streams a blocked call is logged (`tool_call_gated`)
-  but still reaches the caller; in a raw `create({ stream: true })` stream
-  the tool call is not extracted at all, so the policy never runs on it.
-  Stripping is the smaller fix; evaluating raw streams is the real one.
-- **Anthropic `document` blocks** are scanned but not wrapped; PDF/base64
-  sources aren't inspected at all.
+- **Raw-stream tool calls are now evaluated** — the real gap, and the one
+  that most looked like working protection while doing nothing. A raw
+  `create({stream: true})` stream delivers a tool call in fragments; nothing
+  reassembled them, so the policy never ran on a streamed call at all.
+  Assemblers for all three event shapes (Anthropic content blocks, OpenAI
+  chat deltas, OpenAI Responses items) rebuild each call and evaluate it the
+  moment it completes — before the caller can act on it, since the caller
+  executes the tool after the stream yields it. Under `enforceToolPolicy` a
+  blocked call raises `ShieldBlockedToolError` out of the iterator, which is
+  what "strip the block" means when earlier events are already delivered. A
+  truncated stream still reports the call it was assembling.
+- **Per-tool argument schemas** — `ToolPolicy.schemas`. Deliberately not JSON
+  Schema (zero dependencies); the `format` values cover what an injected
+  model reaches for: `path` (traversal including `%2e%2e%2f`, absolute paths,
+  NUL bytes), `url` (non-http schemes, host allow-list including the
+  `https://good.example@evil.example/` userinfo trick), `email`. Undeclared
+  arguments are rejected by default. Arguments that never parsed as JSON are
+  a violation, not a silent pass.
+- **Document blocks** — text documents are now wrapped as
+  `<untrusted_document>`, not just scanned. Sources shield cannot read
+  (base64 PDFs, remote URLs, uploaded file ids) raise `content_not_scanned`
+  with score 0, and count as untrusted input for the tool policy. The point
+  is that silence reads as "checked, clean"; a log that cannot tell "we
+  looked and it was fine" from "we never opened it" is not a security log.
+- **Lint + type-check in CI** — eslint (type-aware) and ruff + mypy, all
+  clean, all gating. Both configs are deliberately narrow: the goal is
+  catching defects, not enforcing style. pyupgrade was excluded after it
+  proposed 83 `Optional[X]` rewrites with no security value. Two real mypy
+  findings were fixed rather than suppressed.
+
+---
+
+## outstanding
+
 - **Split entry points / publish** — `/node`, `/react`, `/anthropic`,
-  `/openai` subpaths and real npm/PyPI names; today everything ships under
-  `@local/shield` and installs via `file:`.
-- **Lint + type-check in CI** — no eslint, no mypy/pyright; the code is
-  annotated but nothing enforces it.
+  `/openai` subpaths and real npm/PyPI names. **Needs your decision on the
+  names**; today everything ships under `@local/shield` and installs via
+  `file:`. This is the only remaining blocker to using shield from an
+  arbitrary app without a path reference.
 - **Toolkit docs** (`docs/` playbook): threat model; the "lethal trifecta"
   rule (untrusted input + private data + exfiltration channel); MCP/plugin
   hygiene — the carta-cap-table plugin injecting `<EXTREMELY_IMPORTANT>`

@@ -191,7 +191,7 @@ if (cmd === "headless") {
 
   const sendNotification = async (fresh: Array<{ pid: number; labels: string[] }>) => {
     if (!notify || fresh.length === 0 || process.platform !== "darwin") return;
-    const first = fresh[0]!;
+    const first = fresh[0];
     const msg = fresh.length === 1
       ? `pid=${first.pid} [${first.labels.join(",")}]`
       : `${fresh.length} new processes, e.g. pid=${first.pid} [${first.labels.join(",")}]`;

@@ -27,6 +27,7 @@ from .core import (
 from .detect import InjectionScan
 from .instance import Shield, create_shield
 from .output import ToolCall
+from .stream_tools import ShieldBlockedToolError, assembler_for
 
 
 class ShieldCoverageError(AttributeError):
@@ -195,6 +196,59 @@ def _extract_document_text(content: Any) -> str:
     return " ".join(out)
 
 
+def _unscannable_documents(content: Any) -> list[str]:
+    """
+    Document sources shield cannot read: a PDF or image as base64, a remote
+    URL, an uploaded file id. The bytes never reach the pattern layer, so a
+    document block is NOT evidence that the document was checked.
+
+    Returns a short description per unreadable source, for the
+    `content_not_scanned` event. Silence here would be the worst outcome: an
+    operator reading a clean log would reasonably conclude the PDF was scanned
+    and found harmless, when in fact it was never opened.
+    """
+    if not isinstance(content, list):
+        return []
+    out: list[str] = []
+    for b in content:
+        if not isinstance(b, dict) or b.get("type") != "document":
+            continue
+        src = b.get("source")
+        if not isinstance(src, dict):
+            continue
+        kind = src.get("type")
+        if kind == "text":
+            continue
+        if kind == "base64":
+            out.append(f'base64 {src.get("media_type") or "document"}')
+        elif kind == "url":
+            out.append(f'remote url {str(src.get("url") or "")[:120]}')
+        elif kind == "file":
+            out.append(f'uploaded file {src.get("file_id") or ""}')
+        else:
+            out.append(f'document source "{kind}"')
+    return out
+
+
+def _wrap_document_blocks(content: Any) -> Any:
+    """
+    Wrap the text inside document blocks as <untrusted_document>. A document
+    is external content in exactly the way a tool result is; it was being
+    scanned but not fenced, so an instruction inside it still read to the
+    model as part of the user's own message.
+    """
+    if not isinstance(content, list):
+        return content
+    wrapped = []
+    for b in content:
+        if isinstance(b, dict) and b.get("type") == "document":
+            src = b.get("source")
+            if isinstance(src, dict) and src.get("type") == "text" and isinstance(src.get("data"), str):
+                b = {**b, "source": {**src, "data": wrap_untrusted(src["data"], "document")}}
+        wrapped.append(b)
+    return wrapped
+
+
 def _wrap_tool_result_blocks(content: Any) -> Any:
     if not isinstance(content, list):
         return content
@@ -288,19 +342,48 @@ class _StreamTap:
     and async iteration.
     """
 
-    def __init__(self, inner: Any, extract: Any, on_done: Optional[Callable[[str], None]]):
+    def __init__(self, inner: Any, extract: Any, on_done: Optional[Callable[[str], None]],
+                 assembler: Any = None, on_tool_call: Optional[Callable[[Any], None]] = None):
         self._inner = inner
         self._extract = extract
         self._on_done = on_done
+        # Tool calls arrive in fragments; the assembler rebuilds them so the
+        # policy can run on a streamed call the way it does on a returned one.
+        self._assembler = assembler
+        self._on_tool_call = on_tool_call
         self.collected: list[str] = []
 
     def _finish(self) -> None:
-        if self._on_done is None:
+        if self._on_done is not None:
+            try:
+                self._on_done("".join(self.collected))
+            except Exception:
+                pass  # canary observation must never break streaming
+        # A stream cut off mid-call still shows what the model was reaching
+        # for. This runs after the text check so a truncated response is
+        # never left unscanned.
+        if self._assembler is not None and self._on_tool_call is not None:
+            try:
+                open_calls = self._assembler.flush()
+            except Exception:
+                open_calls = []
+            for call in open_calls:
+                try:
+                    self._on_tool_call(call)
+                except Exception:
+                    pass  # the stream is already over; nothing left to stop
+
+    def _tools(self, ev: Any) -> None:
+        if self._assembler is None or self._on_tool_call is None:
             return
         try:
-            self._on_done("".join(self.collected))
+            completed = self._assembler.push(ev)
         except Exception:
-            pass  # canary observation must never break streaming
+            return  # a malformed chunk must not break the caller's loop
+        # Deliberately NOT guarded: on_tool_call raises to block, and that has
+        # to reach the caller. A policy decision is not an error to hide.
+        for call in completed:
+            self._on_tool_call(call)
 
     def _take(self, ev: Any) -> None:
         try:
@@ -314,6 +397,9 @@ class _StreamTap:
         try:
             for ev in self._inner:
                 self._take(ev)
+                # Before the yield, not after: a blocked call must stop the
+                # iteration without the completing event reaching the caller.
+                self._tools(ev)
                 yield ev
         finally:
             self._finish()
@@ -322,6 +408,7 @@ class _StreamTap:
         try:
             async for ev in self._inner:
                 self._take(ev)
+                self._tools(ev)  # before the yield, as above
                 yield ev
         finally:
             self._finish()
@@ -394,9 +481,13 @@ class _CanaryCheckedStreamManager:
             if text:
                 self._on_text(text)
             if self._on_final is not None:
-                snap = getattr(self._raw, "current_message_snapshot", None) or getattr(self._raw, "current_completion_snapshot", None)
-                if snap is not None:
-                    self._on_final(snap)
+                # A distinct name: `snap` above is the accumulated TEXT, this
+                # is the response object. Reusing one name for both was what
+                # made the type checker complain, and it was confusing anyway.
+                final = (getattr(self._raw, "current_message_snapshot", None)
+                         or getattr(self._raw, "current_completion_snapshot", None))
+                if final is not None:
+                    self._on_final(final)
         except Exception:
             pass  # observation must never break streaming
 
@@ -440,11 +531,15 @@ class _Prepared:
 
 
 class _ShieldCore:
-    def __init__(self, shield: Shield, wrap: bool, wrap_tools: bool, canary: Optional[str], enforce: bool):
+    def __init__(self, shield: Shield, wrap: bool, wrap_tools: bool, canary: Optional[str], enforce: bool,
+                 wrap_documents: bool = True):
         self._shield = shield
         self._label = shield.app
         self._wrap = wrap
         self._wrap_tools = wrap_tools
+        # A document is external content in the same way a tool result is, so
+        # like tool results this is on by default.
+        self._wrap_documents = wrap_documents
         self._fixed_canary = canary if canary is not None else shield.canary
         self._enforce = enforce
 
@@ -463,6 +558,26 @@ class _ShieldCore:
         if not strip or not self._enforce or not blocked:
             return response
         return strip(response, blocked)
+
+    def _observe_stream_tool_call(self, call: ToolCall, p: _Prepared) -> None:
+        """
+        Evaluate a tool call assembled from a stream. Blocking a streamed call
+        cannot mean stripping it — earlier events are already with the caller —
+        so under enforcement it raises, ending the iteration before the call
+        can be acted on. Without enforcement it is logged like any gated call.
+        """
+        d = self._shield.check_tool_call(
+            call, untrusted_input_seen=p.untrusted_input_seen, input_scans=p.input_scans)
+        if d.decision == "block" and self._enforce:
+            raise ShieldBlockedToolError(call, list(d.reasons))
+
+    def _tap_raw_stream(self, r: Any, p: _Prepared, extract: Any, assembler_kind: str) -> Any:
+        """Tap a raw create(stream=True) stream for both output text and tool calls."""
+        return _StreamTap(
+            r, extract, lambda t: self._observe_output(t, p),
+            assembler=assembler_for(assembler_kind),
+            on_tool_call=lambda call: self._observe_stream_tool_call(call, p),
+        )
 
 
 def _parse_args(raw: Any) -> Any:
@@ -492,7 +607,7 @@ def _strip_anthropic_tool_calls(response: Any, blocked: set) -> Any:
         return response.model_copy(update={"content": content})  # pydantic models (SDK responses)
     except Exception:  # noqa: BLE001
         try:
-            setattr(response, "content", content)
+            response.content = content
         except Exception:  # noqa: BLE001
             pass
         return response
@@ -519,7 +634,7 @@ def _strip_openai_chat_tool_calls(response: Any, blocked: set) -> Any:
                 msg["tool_calls"] = kept
             else:
                 try:
-                    setattr(msg, "tool_calls", kept)
+                    msg.tool_calls = kept
                 except Exception:  # noqa: BLE001
                     pass
     return response
@@ -542,7 +657,7 @@ def _strip_responses_tool_calls(response: Any, blocked: set) -> Any:
         return response.model_copy(update={"output": kept})
     except Exception:  # noqa: BLE001
         try:
-            setattr(response, "output", kept)
+            response.output = kept
         except Exception:  # noqa: BLE001
             pass
         return response
@@ -556,8 +671,9 @@ _ANTHROPIC_MESSAGES_ALLOW = ("count_tokens",)
 
 
 class _AnthropicMessages(_ShieldCore):
-    def __init__(self, inner_messages: Any, shield: Shield, wrap: bool, wrap_tools: bool, canary: Optional[str], enforce: bool):
-        super().__init__(shield, wrap, wrap_tools, canary, enforce)
+    def __init__(self, inner_messages: Any, shield: Shield, wrap: bool, wrap_tools: bool, canary: Optional[str],
+                 enforce: bool, wrap_documents: bool = True):
+        super().__init__(shield, wrap, wrap_tools, canary, enforce, wrap_documents)
         self._m = inner_messages
 
     def _prepare(self, kwargs: dict) -> _Prepared:
@@ -577,12 +693,19 @@ class _AnthropicMessages(_ShieldCore):
                 scan(_extract_text(content))
                 tool_text = _extract_tool_result_text(content)
                 doc_text = _extract_document_text(content)
-                if tool_text or doc_text:
+                unreadable = _unscannable_documents(content)
+                # An unreadable document is still untrusted input — arguably
+                # more so, since nothing here can vouch for it.
+                if tool_text or doc_text or unreadable:
                     untrusted = True
                 scan(tool_text, "tool_result")
                 scan(doc_text, "document")
+                for what in unreadable:
+                    self._shield.report_unscanned(what, channel="document")
 
                 new_content = content
+                if self._wrap_documents:
+                    new_content = _wrap_document_blocks(new_content)
                 if self._wrap_tools:
                     new_content = _wrap_tool_result_blocks(new_content)
                 if self._wrap:
@@ -599,7 +722,7 @@ class _AnthropicMessages(_ShieldCore):
 
         def finish(r: Any) -> Any:
             if kwargs.get("stream"):
-                return _StreamTap(r, _anthropic_delta_text, lambda t: self._observe_output(t, p))
+                return self._tap_raw_stream(r, p, _anthropic_delta_text, "anthropic")
             self._observe_output(_anthropic_response_text(r), p)
             return self._observe_tool_calls(r, _anthropic_tool_calls(r), p, _strip_anthropic_tool_calls)
 
@@ -633,6 +756,7 @@ def shield_anthropic(
     app_label: str = "shield",
     wrap_user_messages: bool = False,
     wrap_tool_results: bool = True,
+    wrap_documents: bool = True,
     announce: bool = True,
     canary: Optional[str] = None,
     passthrough: Sequence[str] = (),
@@ -656,7 +780,7 @@ def shield_anthropic(
     passthrough = list(passthrough)
 
     def messages(client: Any) -> Any:
-        impl = _AnthropicMessages(client.messages, sh, wrap_user_messages, wrap_tool_results, canary, enforce_tool_policy)
+        impl = _AnthropicMessages(client.messages, sh, wrap_user_messages, wrap_tool_results, canary, enforce_tool_policy, wrap_documents)
         return _Guard(
             client.messages,
             "client.messages",
@@ -757,7 +881,7 @@ class _OpenAICompletions(_ShieldCore):
 
         def finish(r: Any) -> Any:
             if kwargs.get("stream"):
-                return _StreamTap(r, _openai_chunk_text, lambda t: self._observe_output(t, p))
+                return self._tap_raw_stream(r, p, _openai_chunk_text, "openai_chat")
             self._observe_output(_openai_completion_text(r), p)
             return self._observe_tool_calls(r, _openai_chat_tool_calls(r), p, _strip_openai_chat_tool_calls)
 
@@ -834,7 +958,7 @@ class _OpenAIResponses(_ShieldCore):
 
         def finish(r: Any) -> Any:
             if kwargs.get("stream"):
-                return _StreamTap(r, _responses_delta_text, lambda t: self._observe_output(t, p))
+                return self._tap_raw_stream(r, p, _responses_delta_text, "openai_responses")
             self._observe_output(_responses_output_text(r), p)
             return self._observe_tool_calls(r, _responses_tool_calls(r), p, _strip_responses_tool_calls)
 

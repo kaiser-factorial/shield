@@ -13,7 +13,7 @@ from .logger import emit_event
 # Library version — keep in sync with pyproject.toml and the TypeScript
 # SHIELD_VERSION (a test enforces the pyproject half). Announced in startup
 # banners and heartbeat events so `shield status` can flag stale apps.
-SHIELD_VERSION = "1.7.0"
+SHIELD_VERSION = "1.8.0"
 
 # Any attempt to open or close an untrusted_* tag inside wrapped content —
 # covers closing slashes, embedded whitespace, zero-width padding, and the

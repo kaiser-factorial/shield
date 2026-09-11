@@ -22,10 +22,10 @@ const IS_NODE = typeof process !== "undefined" && !!process.versions?.node;
 
 // Synchronous builtin access where available (Node ≥ 20.16 / 22.3), so the
 // first event can be written before the process has a chance to exit.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function builtin<T>(name: string): T | null {
   if (!IS_NODE) return null;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   const get = (process as any).getBuiltinModule as ((id: string) => unknown) | undefined;
   if (typeof get !== "function") return null;
   try { return get(`node:${name}`) as T; } catch { return null; }
@@ -150,7 +150,11 @@ export function initFileLogger(): Promise<void> {
 export function sanitizeForTerminal(text: string): string {
   return text
     .replace(/[\n\t]/g, " ")
-    // C0 controls (incl. ESC and \r), DEL, and C1 controls (incl. CSI/OSC 0x9B/0x9D)
+    // C0 controls (incl. ESC and \r), DEL, and C1 controls (incl. CSI/OSC 0x9B/0x9D).
+    // The control characters are the entire subject of this function: log
+    // lines carry attacker-influenced text to a terminal, where an escape
+    // sequence can rewrite what the operator sees.
+    // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "")
     // Bidi embedding/override/isolate controls
     .replace(/[\u202A-\u202E\u2066-\u2069]/g, "");

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "shield-local"
-version = "1.7.0"
+version = "1.8.0"
 description = "Prompt injection defense utilities — detect, wrap, harden"
 requires-python = ">=3.10"
 dependencies = []   # zero hard deps — anthropic/openai are optional
@@ -16,3 +16,26 @@ all       = ["anthropic>=0.20", "openai>=1.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["shield"]
+
+# Lint and type-check config. Both run in CI; the code was already annotated,
+# nothing was enforcing it.
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# Deliberately narrow. The point is to catch real defects — undefined names,
+# unused imports, mutable default arguments, except/pass that swallows a bug —
+# not to enforce house style on a codebase that already reads consistently.
+# "UP" (pyupgrade) is excluded on purpose: it wanted 83 Optional[X] -> X | None
+# rewrites across both wrappers, which is churn with no security value and a
+# large diff to review for nothing. "SIM" likewise: its findings here were all
+# contextlib.suppress and ternary suggestions, none of them defects.
+# E501 is off: several lines are long regex patterns that are worse wrapped.
+select = ["E", "F", "W", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true   # anthropic / openai are optional deps
+warn_unused_ignores = true

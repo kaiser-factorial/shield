@@ -68,6 +68,7 @@ export {
   scanOutput,
   outputDetail,
   evaluateToolCall,
+  ShieldBlockedToolError,
   SECRET_PATTERNS,
   PII_PATTERNS,
   type OutputScan,

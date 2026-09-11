@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from urllib.parse import unquote
 from typing import Any, Callable, Optional, Sequence
 
 from .detect import InjectionScan, detect_injection
@@ -235,7 +236,7 @@ def scan_output(
             report("mailto", 0.4, m.start(), m.end() - m.start())
 
     if on("refusal"):
-        after_flagged = bool(input_scans) and any(s.flagged for s in input_scans)
+        after_flagged = any(s.flagged for s in (input_scans or []))
         for label, pat in REFUSAL_PATTERNS:
             m = pat.search(scanned)
             if not m:
@@ -304,8 +305,177 @@ class ToolPolicy:
     side_effects: Optional[list[str]] = None
     block_side_effects_after_untrusted: bool = False
     argument_rules: list[ToolArgumentRule] = field(default_factory=list)
+    #: Per-tool argument schemas. Stronger than `argument_rules` for the
+    #: shapes that matter — a regex over serialized JSON cannot tell which
+    #: field it matched, nor notice an argument that should not be there.
+    schemas: list["ToolSchema"] = field(default_factory=list)
     allowed_hosts: Optional[list[str]] = None
     block_unlisted_hosts: bool = False
+
+
+
+# ── per-tool argument schemas ────────────────────────────────────────────────
+
+
+@dataclass
+class ToolParamSchema:
+    """
+    A constraint on one tool argument. Mirrors src/output.ts.
+
+    Deliberately not JSON Schema: shield ships no dependencies, and a full
+    validator would be a large surface for the sake of keywords that do
+    nothing for security. What is here is the set that stops the arguments an
+    injected model actually reaches for — a path that escapes its directory, a
+    URL pointing at someone else's host, a free-form string where an enum was
+    expected, a number outside its range.
+    """
+    type: Optional[str] = None          # string|number|integer|boolean|object|array
+    enum: Optional[list] = None
+    pattern: Optional[re.Pattern] = None
+    max_length: Optional[int] = None
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+    format: Optional[str] = None        # "url" | "email" | "path"
+    allowed_hosts: Optional[list[str]] = None
+    allow_absolute: bool = False
+    items: Optional["ToolParamSchema"] = None
+
+
+@dataclass
+class ToolSchema:
+    tool: str
+    properties: dict[str, ToolParamSchema] = field(default_factory=dict)
+    required: list[str] = field(default_factory=list)
+    #: Reject arguments not named in `properties`. Defaults to True: an
+    #: argument nobody declared is exactly how an extra `path` or `url` gets
+    #: smuggled into an otherwise ordinary call.
+    additional_properties: bool = False
+    #: Severity of a violation — a schema is an assertion about what the tool
+    #: accepts, not a suggestion.
+    action: str = "block"
+
+
+_TRAVERSAL_RE = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
+_ABSOLUTE_RE = re.compile(r"^(?:[\\/]|[A-Za-z]:[\\/])")
+_URL_SCHEME_RE = re.compile(r"^([a-z][a-z0-9+.-]*):", re.I)
+_URL_HOST_RE = re.compile(r"^[a-z]+://([^/?#]+)", re.I)
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@.]+\.[^\s@]+$")
+
+
+def _type_of(v: Any) -> str:
+    if isinstance(v, bool):
+        return "boolean"
+    if isinstance(v, list):
+        return "array"
+    if isinstance(v, dict):
+        return "object"
+    if isinstance(v, int) or isinstance(v, float):
+        return "number"
+    if isinstance(v, str):
+        return "string"
+    if v is None:
+        return "null"
+    return type(v).__name__
+
+
+def _check_param(name: str, value: Any, schema: ToolParamSchema) -> list[str]:
+    out: list[str] = []
+    actual = _type_of(value)
+
+    if schema.type:
+        if schema.type == "integer":
+            ok = isinstance(value, int) and not isinstance(value, bool)
+        else:
+            ok = actual == schema.type
+        if not ok:
+            # A type mismatch makes every other check meaningless — report it
+            # alone rather than piling on errors derived from the wrong type.
+            return [f'"{name}" should be {schema.type}, got {actual}']
+
+    if schema.enum is not None and value not in schema.enum:
+        out.append(f'"{name}" is not one of the allowed values')
+
+    if isinstance(value, str):
+        if schema.max_length is not None and len(value) > schema.max_length:
+            out.append(f'"{name}" is longer than {schema.max_length} characters')
+        if schema.pattern is not None and not schema.pattern.search(value):
+            out.append(f'"{name}" does not match the required pattern')
+        if schema.format == "path":
+            # Check the raw string AND its percent-decoded form: %2e%2e%2f is
+            # the oldest way past a check that only looks at literal dots.
+            try:
+                decoded = unquote(value)
+            except Exception:  # noqa: BLE001
+                decoded = value
+            if _TRAVERSAL_RE.search(value) or _TRAVERSAL_RE.search(decoded):
+                out.append(f'"{name}" contains a path traversal segment')
+            if not schema.allow_absolute and _ABSOLUTE_RE.search(value):
+                out.append(f'"{name}" is an absolute path')
+            if "\x00" in value:
+                out.append(f'"{name}" contains a NUL byte')
+        if schema.format == "url":
+            m = _URL_SCHEME_RE.match(value)
+            scheme = m.group(1).lower() if m else None
+            if scheme not in ("http", "https"):
+                # file:, data: and javascript: in a tool argument are not typos.
+                out.append(f'"{name}" is not an http(s) URL')
+            elif schema.allowed_hosts is not None:
+                hm = _URL_HOST_RE.match(value)
+                host = hm.group(1).split("@")[-1].split(":")[0] if hm else None
+                if not host or not _host_allowed(host, schema.allowed_hosts):
+                    out.append(f'"{name}" references unlisted host {host or "(unparseable)"}')
+        if schema.format == "email" and not _EMAIL_RE.match(value):
+            out.append(f'"{name}" is not an email address')
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if schema.minimum is not None and value < schema.minimum:
+            out.append(f'"{name}" is below {schema.minimum}')
+        if schema.maximum is not None and value > schema.maximum:
+            out.append(f'"{name}" is above {schema.maximum}')
+
+    if isinstance(value, list) and schema.items is not None:
+        for i, el in enumerate(value):
+            out.extend(_check_param(f"{name}[{i}]", el, schema.items))
+
+    return out
+
+
+def validate_tool_arguments(call: ToolCall, schema: ToolSchema) -> list[str]:
+    """
+    Validate a call's arguments against its schema; empty means it passed.
+
+    Arguments that did not parse as JSON are themselves a violation: a schema
+    that silently does not run is worse than no schema, because it reads as a
+    check that passed.
+    """
+    inp = call.input
+
+    if isinstance(inp, str):
+        return ["arguments did not parse as JSON, so the schema could not be applied"]
+    if inp is None:
+        return ([f'arguments are missing ({", ".join(schema.required)} required)']
+                if schema.required else [])
+    if not isinstance(inp, dict):
+        return [f"arguments should be an object, got {_type_of(inp)}"]
+
+    out: list[str] = []
+    props = schema.properties or {}
+
+    for name in schema.required:
+        if name not in inp or inp[name] is None:
+            out.append(f'"{name}" is required but missing')
+
+    if not schema.additional_properties:
+        for name in inp:
+            if name not in props:
+                out.append(f'"{name}" is not a declared argument of {call.name}')
+
+    for name, param in props.items():
+        if name not in inp or inp[name] is None:
+            continue
+        out.extend(_check_param(name, inp[name], param))
+
+    return out
 
 
 @dataclass
@@ -347,7 +517,7 @@ def evaluate_tool_call(
     if policy.allow is not None and call.name not in policy.allow:
         escalate("block", f'tool "{call.name}" is not on the allow list')
 
-    flagged_input = bool(input_scans) and any(s.flagged for s in input_scans)  # type: ignore[union-attr]
+    flagged_input = any(s.flagged for s in (input_scans or []))
     untrusted = untrusted_input_seen or flagged_input
     if policy.side_effects and call.name in policy.side_effects and untrusted:
         escalate("block" if policy.block_side_effects_after_untrusted else "flag",
@@ -360,6 +530,12 @@ def evaluate_tool_call(
             continue
         if rule.pattern.search(text):
             escalate(rule.action, rule.reason or f"argument rule matched: {rule.pattern.pattern}")
+
+    for schema in policy.schemas:
+        if schema.tool != call.name:
+            continue
+        for v in validate_tool_arguments(call, schema):
+            escalate(schema.action, f"schema: {v}")
 
     if policy.allowed_hosts is not None:
         for m in _URL_RE.finditer(text):

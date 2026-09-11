@@ -14,7 +14,7 @@
  * (a test enforces the package.json half). Announced in startup banners and
  * heartbeat events so `shield status` can flag apps running stale copies.
  */
-export const SHIELD_VERSION = "1.7.0";
+export const SHIELD_VERSION = "1.8.0";
 
 // ── 1. DETECT ────────────────────────────────────────────────────────────────
 
@@ -348,6 +348,7 @@ export type ShieldEventType =
   | "output_flagged"       // output: secrets / PII / exfil channel / echoed injection
   | "tool_call_gated"      // tool: a requested tool call was flagged or blocked by policy
   | "trigger_stripped"     // wrap: a tag-breakout attempt was neutralized
+  | "content_not_scanned"  // input: a block shield could not read (PDF, image, remote URL)
   | "shield_started"       // heartbeat
   | "headless_detected";   // host: browser automation process seen
 

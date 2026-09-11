@@ -28,7 +28,11 @@ from .headless import (
 )
 from .logger import emit_event, on_event, off_event, read_events
 from .wrappers import ShieldAnthropicClient, ShieldOpenAIClient, ShieldCoverageError, shield_anthropic, shield_openai
+from .stream_tools import ShieldBlockedToolError
 from .output import (
+    ToolSchema,
+    ToolParamSchema,
+    validate_tool_arguments,
     OutputScan,
     OutputFinding,
     ToolCall,
@@ -95,6 +99,10 @@ __all__ = [
     "Shield",
     "create_shield",
     "get_default_shield",
+    "ShieldBlockedToolError",
+    "ToolSchema",
+    "ToolParamSchema",
+    "validate_tool_arguments",
     "Detector",
     "DetectorContext",
     "DetectorFinding",

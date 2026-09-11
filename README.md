@@ -197,6 +197,91 @@ cd python && python3 -m unittest tests.test_benchmark -v
 Both languages read the same corpus and the same floors, so the two
 implementations cannot drift apart without one of them failing.
 
+### Tool calls in streams
+
+A non-streaming response is a finished object, so the wrapper reads its tool
+calls, evaluates them, and strips the blocked ones before you see them. A raw
+`create({ stream: true })` stream delivers a tool call in fragments, and until
+v1.8.0 nothing reassembled them — the policy never ran on a streamed call at
+all. Streaming apps had scanning but no gating, which from the outside is
+indistinguishable from gating that works.
+
+Shield now rebuilds each call from its fragments and evaluates it the moment
+it completes, which is before you can act on it: the tool call is executed by
+your code after the stream yields it, not by the SDK. Under
+`enforceToolPolicy` a blocked call throws `ShieldBlockedToolError` out of the
+iterator — the streaming equivalent of stripping the block, since earlier
+events are already with you and there is nothing left to strip.
+
+```ts
+import { ShieldBlockedToolError } from '@local/shield';
+
+try {
+  for await (const event of stream) { render(event); }
+} catch (err) {
+  if (err instanceof ShieldBlockedToolError) {
+    console.warn(`blocked ${err.call.name}:`, err.reasons);
+  } else throw err;
+}
+```
+
+A stream that is cut off mid-call still reports what was being assembled: a
+truncated argument string shows intent, and dropping it would hide the most
+interesting case.
+
+### Per-tool argument schemas
+
+`argumentRules` matches a regex against the serialized arguments. It cannot
+tell which field matched, cannot say "this must be one of three values", and —
+the gap that matters most — cannot notice an argument that should not be there
+at all.
+
+```ts
+const shield = createShield({
+  toolPolicy: {
+    schemas: [
+      {
+        tool: 'read_file',
+        required: ['path'],
+        properties: { path: { type: 'string', format: 'path', maxLength: 200 } },
+      },
+      {
+        tool: 'http_post',
+        required: ['url'],
+        properties: {
+          url: { type: 'string', format: 'url', allowedHosts: ['api.example.com'] },
+          retries: { type: 'integer', minimum: 0, maximum: 5 },
+        },
+      },
+    ],
+  },
+});
+```
+
+This is not JSON Schema, deliberately: shield ships no dependencies, and a full
+validator would be a large surface for keywords that do nothing for security.
+The three `format` values cover what an injected model actually reaches for.
+`path` rejects traversal (including percent-encoded `%2e%2e%2f`), absolute
+paths and NUL bytes. `url` rejects non-http schemes (`file:`, `data:`,
+`javascript:`) and hosts outside your list, including the
+`https://api.example.com@evil.example/` userinfo trick. Undeclared arguments
+are rejected by default, and arguments that never parsed as JSON are a
+violation rather than a silent pass — a schema that quietly does not run reads
+as a check that passed.
+
+### Documents, and knowing what wasn't scanned
+
+Text documents are fenced as `<untrusted_document>` and scanned, like tool
+results. A PDF or image arrives as base64 the pattern layer cannot read, and a
+remote URL is fetched server-side where shield never sees it at all. Those
+raise `content_not_scanned` with score 0 — a coverage gap, not a detection.
+
+This exists because the alternative is silence, and silence in a security log
+reads as "checked, clean". A log that cannot distinguish "we looked and it was
+fine" from "we never opened it" is not a security log. Unreadable content also
+counts as untrusted input for the tool policy: a PDF nobody checked is the
+stronger case for gating side-effecting tools, not the weaker one.
+
 ### Coverage is deny-by-default
 
 A protection that silently doesn't apply looks exactly like no protection, so
@@ -322,7 +407,7 @@ There is no auto-update — that was removed on purpose (see the sync section be
 
 ## Tests
 
-Both packages have zero-dependency test suites (Node's built-in runner / Python's `unittest`) covering the attack corpus, benign false-positive checks, tag-breakout attempts, canary behavior, the detector API, and the detection benchmark (118 TypeScript tests, 98 Python):
+Both packages have zero-dependency test suites (Node's built-in runner / Python's `unittest`) covering the attack corpus, benign false-positive checks, tag-breakout attempts, canary behavior, the detector API, streamed tool calls, argument schemas, and the detection benchmark (146 TypeScript tests, 126 Python):
 
 ```bash
 # TypeScript (runs in CI on every push)
@@ -330,6 +415,10 @@ npm test
 
 # Python (also runs in CI)
 cd python && python3 -m unittest discover -s tests -v
+
+# Lint and type-check (both also run in CI)
+npm run lint
+cd python && ruff check shield && mypy shield
 ```
 
 When adding a detection pattern or changing wrapping/hardening behavior, change **both** packages and both test suites — they are kept in feature parity by hand, and CI fails if `package.json`, `pyproject.toml`, and the two `SHIELD_VERSION` constants disagree (`npm run check:versions`). Both live in this repo (TypeScript at the root, Python under `python/`) so one commit covers both sides.

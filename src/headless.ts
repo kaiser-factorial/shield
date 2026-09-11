@@ -57,7 +57,10 @@ export async function scanHeadlessProcesses(): Promise<HeadlessProcess[]> {
   const { execFile } = await import("child_process");
   const stdout = await new Promise<string>((resolve, reject) => {
     execFile("ps", ["-axo", "pid=,ppid=,command="], { maxBuffer: 16 * 1024 * 1024 }, (err, out) => {
-      if (err) reject(err);
+      // Normalized rather than passed through: execFile's callback types the
+      // error as nullable, and a rejection reason that isn't an Error loses
+      // its stack at the catch site.
+      if (err) reject(err instanceof Error ? err : new Error("ps failed"));
       else resolve(out);
     });
   });
