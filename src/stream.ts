@@ -38,7 +38,10 @@ export function tapEventStream(stream: any, extract: (ev: any) => string, onDone
             throw e;
           }
           if (r.done) finish();
-          else buf += extract(r.value);
+          else {
+            // A malformed chunk must not throw into the consumer's loop.
+            try { buf += extract(r.value) ?? ""; } catch { /* ignore */ }
+          }
           return r;
         },
         async return(v?: unknown) {

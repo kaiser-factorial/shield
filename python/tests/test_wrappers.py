@@ -25,7 +25,7 @@ _tmp = tempfile.TemporaryDirectory()
 shield_logger.LOG_DIR = Path(_tmp.name)
 shield_logger.LOG_FILE = shield_logger.LOG_DIR / "events.jsonl"
 
-CANARY_RE = re.compile(r"SHLD-[0-9A-F]{6,}")
+CANARY_RE = re.compile(r"SHLD-[0-9A-Z]{6,}")
 
 
 class FakeAnthropicMessages:

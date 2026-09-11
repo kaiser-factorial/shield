@@ -9,7 +9,7 @@
  */
 
 import { readEvents, summarizeStatus, initFileLogger, sanitizeForTerminal, LOG_FILE } from "../src/logger.js";
-import { detectInjection, SHIELD_VERSION } from "../src/shield.js";
+import { detectInjection, SHIELD_VERSION, type ShieldEvent } from "../src/shield.js";
 import { scanHeadlessProcesses, reportHeadless } from "../src/headless.js";
 import { existsSync, writeFileSync } from "fs";
 
@@ -41,6 +41,23 @@ function typeLabel(t: string): string {
 const args = process.argv.slice(2);
 const cmd = args[0];
 
+const EVENT_TYPES: ReadonlyArray<ShieldEvent["type"]> = [
+  "injection_detected", "canary_leaked", "trigger_stripped", "shield_started", "headless_detected",
+];
+
+/** Positive integer flag value, or the default; rejects junk loudly. */
+function intFlag(name: string, dflt: number, min = 1): number {
+  const i = args.indexOf(name);
+  if (i < 0) return dflt;
+  const raw = args[i + 1];
+  const n = Number(raw);
+  if (!raw || !Number.isInteger(n) || n < min) {
+    console.error(`${name} expects an integer >= ${min}, got ${JSON.stringify(raw ?? "")}`);
+    process.exit(2);
+  }
+  return n;
+}
+
 if (!cmd || cmd === "help" || cmd === "--help") {
   console.log(`
 ${BOLD}shield${RESET} — prompt injection defense CLI
@@ -48,7 +65,7 @@ ${BOLD}shield${RESET} — prompt injection defense CLI
 ${BOLD}COMMANDS${RESET}
   ${CYAN}shield logs${RESET}                     Show recent injection events
     ${DIM}--limit N${RESET}                      Show last N events (default 50)
-    ${DIM}--type TYPE${RESET}                    Filter: injection_detected | canary_leaked | trigger_stripped
+    ${DIM}--type TYPE${RESET}                    Filter: injection_detected | canary_leaked | trigger_stripped | shield_started | headless_detected
     ${DIM}--source SRC${RESET}                   Filter by source substring
 
   ${CYAN}shield status${RESET}                   Per-app health: last heartbeat, version drift, 7-day counts
@@ -60,19 +77,25 @@ ${BOLD}COMMANDS${RESET}
   ${CYAN}shield clear${RESET}                    Wipe the event log
 
 ${BOLD}LOG FILE${RESET}
-  ${DIM}${LOG_FILE}${RESET}
+  ${DIM}${LOG_FILE || "(unavailable — set SHIELD_LOG_DIR)"}${RESET}
 `);
   process.exit(0);
 }
 
 if (cmd === "logs") {
-  const limitIdx = args.indexOf("--limit");
   const typeIdx = args.indexOf("--type");
   const sourceIdx = args.indexOf("--source");
 
-  const limit = limitIdx >= 0 ? Number(args[limitIdx + 1] || 50) : 50;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const type = typeIdx >= 0 ? (args[typeIdx + 1] as any) as import("../src/shield.js").ShieldEvent["type"] : undefined;
+  const limit = intFlag("--limit", 50);
+  let type: ShieldEvent["type"] | undefined;
+  if (typeIdx >= 0) {
+    const raw = args[typeIdx + 1] ?? "";
+    if (!(EVENT_TYPES as readonly string[]).includes(raw)) {
+      console.error(`--type must be one of: ${EVENT_TYPES.join(", ")}`);
+      process.exit(2);
+    }
+    type = raw as ShieldEvent["type"];
+  }
   const source = sourceIdx >= 0 ? args[sourceIdx + 1] : undefined;
 
   const events = await readEvents({ limit, type, source });
@@ -145,10 +168,11 @@ if (cmd === "status") {
 if (cmd === "headless") {
   const watch = args.includes("--watch");
   const notify = args.includes("--notify");
-  const intervalIdx = args.indexOf("--interval");
-  const intervalSec = intervalIdx >= 0 ? Math.max(2, Number(args[intervalIdx + 1] || 15)) : 15;
+  const intervalSec = intFlag("--interval", 15, 2);
 
-  initFileLogger(); // detections should land in the shared log
+  // Detections must land in the shared log — and the one-shot path exits
+  // right after scanning, so wait for the sink to be ready first.
+  await initFileLogger();
 
   const seenPids = new Set<number>();
 
@@ -221,7 +245,7 @@ if (cmd === "scan") {
 }
 
 if (cmd === "clear") {
-  if (existsSync(LOG_FILE)) {
+  if (LOG_FILE && existsSync(LOG_FILE)) {
     writeFileSync(LOG_FILE, "", { encoding: "utf8", mode: 0o600 });
     console.log(`${GREEN}Event log cleared.${RESET}`);
   } else {

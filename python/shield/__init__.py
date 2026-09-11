@@ -9,11 +9,12 @@ Quick start:
     # Use client.messages.create() / .stream() exactly as before.
 """
 
-from .detect import detect_injection, scan_detail, InjectionScan
+from .detect import detect_injection, scan_detail, normalize_for_scan, InjectionScan, PATTERN_COUNT, MAX_SCAN_CHARS
 from .core import (
     SHIELD_VERSION,
     announce_shield,
     sanitize_untrusted,
+    normalize_label,
     wrap_untrusted,
     harden_system_prompt,
     output_leaked_canary,
@@ -25,8 +26,8 @@ from .headless import (
     scan_headless_processes,
     scan_and_report,
 )
-from .logger import emit_event
-from .wrappers import ShieldAnthropicClient, ShieldOpenAIClient
+from .logger import emit_event, on_event, off_event, read_events
+from .wrappers import ShieldAnthropicClient, ShieldOpenAIClient, ShieldCoverageError, shield_anthropic, shield_openai
 
 __version__ = SHIELD_VERSION
 
@@ -36,17 +37,27 @@ __all__ = [
     "announce_shield",
     "detect_injection",
     "scan_detail",
+    "normalize_for_scan",
     "InjectionScan",
+    "PATTERN_COUNT",
+    "MAX_SCAN_CHARS",
     "sanitize_untrusted",
+    "normalize_label",
     "wrap_untrusted",
     "harden_system_prompt",
     "output_leaked_canary",
     "generate_canary",
     "emit_event",
+    "on_event",
+    "off_event",
+    "read_events",
     "HeadlessProcess",
     "match_headless",
     "scan_headless_processes",
     "scan_and_report",
     "ShieldAnthropicClient",
     "ShieldOpenAIClient",
+    "ShieldCoverageError",
+    "shield_anthropic",
+    "shield_openai",
 ]

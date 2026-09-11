@@ -133,11 +133,11 @@ class TestDetect(unittest.TestCase):
         detail = scan_detail(text, scan)
         # The old behavior (first 200 chars of the message) would only show padding.
         self.assertIn("ignore all previous instructions", detail)
-        self.assertTrue(detail.startswith("[ignore-instructions]"))
-        self.assertLessEqual(len(detail), 200)
+        self.assertTrue(detail.startswith("[ignore-instructions @L1]"))
+        self.assertLessEqual(len(detail), 300)
 
     def test_threshold_configurable(self):
-        text = "act as a translator for this paragraph"  # weight 0.5
+        text = "pretend you are a pirate for this paragraph"  # weight 0.5
         self.assertTrue(detect_injection(text, threshold=0.5).flagged)
         self.assertFalse(detect_injection(text, threshold=0.6).flagged)
 

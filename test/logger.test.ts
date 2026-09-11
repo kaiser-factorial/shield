@@ -92,7 +92,9 @@ test("logger module scope does not require `process` (browser safety)", async ()
     delete globalThis.process;
     const mod = await import(`../src/logger.js?noprocess=${Date.now()}`);
     assert.equal(typeof mod.sanitizeForTerminal, "function");
-    assert.ok(mod.LOG_FILE.endsWith("/.shield/events.jsonl"));
+    // No process ⇒ no home dir ⇒ file logging disabled, not a bogus "~" path.
+    assert.equal(mod.LOG_FILE, "");
+    assert.deepEqual(await mod.readEvents(), []);
   } finally {
     globalThis.process = realProcess;
   }

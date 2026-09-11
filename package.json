@@ -1,7 +1,7 @@
 {
   "name": "@local/shield",
-  "version": "1.4.2",
-  "description": "Prompt injection defense utilities \u2014 detect, wrap, harden, log",
+  "version": "1.5.0",
+  "description": "Prompt injection defense utilities — detect, wrap, harden, log",
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
@@ -16,24 +16,31 @@
   },
   "exports": {
     ".": {
-      "import": "./dist/src/index.js",
-      "types": "./dist/src/index.d.ts"
+      "types": "./dist/src/index.d.ts",
+      "browser": "./dist/src/index.browser.js",
+      "import": "./dist/src/index.js"
+    },
+    "./browser": {
+      "types": "./dist/src/index.browser.d.ts",
+      "import": "./dist/src/index.browser.js"
     },
     "./react": {
-      "import": "./dist/src/react.js",
-      "types": "./dist/src/react.d.ts"
+      "types": "./dist/src/react.d.ts",
+      "import": "./dist/src/react.js"
     },
     "./shield": {
-      "import": "./dist/src/shield.js",
-      "types": "./dist/src/shield.d.ts"
-    }
+      "types": "./dist/src/shield.d.ts",
+      "import": "./dist/src/shield.js"
+    },
+    "./package.json": "./package.json"
   },
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
-    "test": "tsc && node --test dist/test/*.test.js",
+    "test": "tsc && node --test dist/test/*.test.js && npm run check:versions",
     "logs": "node dist/bin/shield-cli.js logs",
-    "scan": "node dist/bin/shield-cli.js scan"
+    "scan": "node dist/bin/shield-cli.js scan",
+    "check:versions": "node scripts/check-versions.mjs"
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.20",
@@ -58,5 +65,9 @@
     "openai": "^6.45.0",
     "react": "^19.2.7",
     "typescript": "^5.9.3"
-  }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": false
 }
