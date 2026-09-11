@@ -34,6 +34,8 @@ function typeLabel(t: string): string {
     case "trigger_stripped":   return `${YELLOW}✂ trigger${RESET}`;
     case "shield_started":     return `${GREEN}✓ start${RESET}`;
     case "headless_detected":  return `${YELLOW}👻 headless${RESET}`;
+    case "output_flagged":     return `${RED}📤 output${RESET}`;
+    case "tool_call_gated":    return `${RED}🛠 tool${RESET}`;
     default:                   return t;
   }
 }
@@ -42,7 +44,8 @@ const args = process.argv.slice(2);
 const cmd = args[0];
 
 const EVENT_TYPES: ReadonlyArray<ShieldEvent["type"]> = [
-  "injection_detected", "canary_leaked", "trigger_stripped", "shield_started", "headless_detected",
+  "injection_detected", "canary_leaked", "output_flagged", "tool_call_gated",
+  "trigger_stripped", "shield_started", "headless_detected",
 ];
 
 /** Positive integer flag value, or the default; rejects junk loudly. */
@@ -65,7 +68,7 @@ ${BOLD}shield${RESET} — prompt injection defense CLI
 ${BOLD}COMMANDS${RESET}
   ${CYAN}shield logs${RESET}                     Show recent injection events
     ${DIM}--limit N${RESET}                      Show last N events (default 50)
-    ${DIM}--type TYPE${RESET}                    Filter: injection_detected | canary_leaked | trigger_stripped | shield_started | headless_detected
+    ${DIM}--type TYPE${RESET}                    Filter: injection_detected | canary_leaked | output_flagged | tool_call_gated | trigger_stripped | shield_started | headless_detected
     ${DIM}--source SRC${RESET}                   Filter by source substring
 
   ${CYAN}shield status${RESET}                   Per-app health: last heartbeat, version drift, 7-day counts
@@ -140,6 +143,8 @@ if (cmd === "status") {
       : `${DIM}no heartbeat ever${RESET}`);
     bits.push(`7d: ${app.injections7d} injections, ${app.stripped7d} stripped, ` +
       (app.leaks7d > 0 ? `${RED}${app.leaks7d} canary leaks${RESET}` : `0 leaks`) +
+      (app.outputFlagged7d > 0 ? `, ${RED}${app.outputFlagged7d} output flags${RESET}` : "") +
+      (app.toolGated7d > 0 ? `, ${RED}${app.toolGated7d} tool calls gated${RESET}` : "") +
       (app.headless7d > 0 ? `, ${YELLOW}${app.headless7d} headless${RESET}` : ""));
     console.log(`  ${CYAN}${app.app}${RESET}  ${bits.join(`  ${DIM}·${RESET}  `)}`);
 
@@ -155,6 +160,14 @@ if (cmd === "status") {
     }
     if (app.leaks7d > 0) {
       console.log(`    ${RED}⚠ canary leaked in the last 7 days — inspect: shield logs --type canary_leaked --source ${app.app}${RESET}`);
+      warnings++;
+    }
+    if (app.outputFlagged7d > 0) {
+      console.log(`    ${RED}⚠ model output flagged (secrets/PII/exfil/echo) — inspect: shield logs --type output_flagged --source ${app.app}${RESET}`);
+      warnings++;
+    }
+    if (app.toolGated7d > 0) {
+      console.log(`    ${RED}⚠ tool calls flagged/blocked by policy — inspect: shield logs --type tool_call_gated --source ${app.app}${RESET}`);
       warnings++;
     }
   }

@@ -209,6 +209,10 @@ export interface AppStatus {
   leaks7d: number;
   stripped7d: number;
   headless7d: number;
+  /** output_flagged events (secrets / PII / exfil / echo) in the last 7 days */
+  outputFlagged7d: number;
+  /** tool_call_gated events in the last 7 days */
+  toolGated7d: number;
 }
 
 function epoch(ts: string | null | undefined): number {
@@ -231,7 +235,7 @@ export function summarizeStatus(events: ShieldEvent[], now: Date = new Date()): 
     const app = source.split(":")[0] || source;
     let s = byApp.get(app);
     if (!s) {
-      s = { app, version: null, lastStarted: null, lastEventAt: null, injections7d: 0, leaks7d: 0, stripped7d: 0, headless7d: 0 };
+      s = { app, version: null, lastStarted: null, lastEventAt: null, injections7d: 0, leaks7d: 0, stripped7d: 0, headless7d: 0, outputFlagged7d: 0, toolGated7d: 0 };
       byApp.set(app, s);
     }
 
@@ -250,6 +254,8 @@ export function summarizeStatus(events: ShieldEvent[], now: Date = new Date()): 
       else if (ev.type === "canary_leaked") s.leaks7d++;
       else if (ev.type === "trigger_stripped") s.stripped7d++;
       else if (ev.type === "headless_detected") s.headless7d++;
+      else if (ev.type === "output_flagged") s.outputFlagged7d++;
+      else if (ev.type === "tool_call_gated") s.toolGated7d++;
     }
   }
 

@@ -14,7 +14,7 @@
  * (a test enforces the package.json half). Announced in startup banners and
  * heartbeat events so `shield status` can flag apps running stale copies.
  */
-export const SHIELD_VERSION = "1.5.0";
+export const SHIELD_VERSION = "1.6.0";
 
 // ── 1. DETECT ────────────────────────────────────────────────────────────────
 
@@ -338,12 +338,24 @@ export function outputLeakedCanary(output: string, canary: string): boolean {
 
 // ── LOGGING ──────────────────────────────────────────────────────────────────
 
+export type ShieldEventType =
+  | "injection_detected"   // input: an injection pattern matched
+  | "canary_leaked"        // output: the system-prompt canary appeared
+  | "output_flagged"       // output: secrets / PII / exfil channel / echoed injection
+  | "tool_call_gated"      // tool: a requested tool call was flagged or blocked by policy
+  | "trigger_stripped"     // wrap: a tag-breakout attempt was neutralized
+  | "shield_started"       // heartbeat
+  | "headless_detected";   // host: browser automation process seen
+
 export interface ShieldEvent {
-  type: "injection_detected" | "canary_leaked" | "trigger_stripped" | "shield_started" | "headless_detected";
+  type: ShieldEventType;
+  /** App label, optionally with a ":channel" qualifier (":tool_result", ":document"). */
   source: string;
   detail: string;
   score?: number;
   patterns?: string[];
+  /** Which side of the model the event concerns. */
+  direction?: "input" | "output" | "tool" | "system";
   timestamp: string;
 }
 

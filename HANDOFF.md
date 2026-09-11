@@ -1,6 +1,24 @@
 # shield handoff
 
-**State as of 2026-09-10:** v1.5.0. See `docs/REVIEW-2026-09.md` for the
+**State as of 2026-09-11:** v1.6.0. The review's two open items shipped:
+
+**v1.6.0 (output pipeline + instance API):** `scanOutput` / `scan_output`
+inspects model output for credential shapes, registered app secrets, PII,
+exfiltration channels (image beacons, opaque-query URLs to unlisted hosts,
+mailto) and *echo* of input-flagged patterns → `output_flagged` events with
+masked excerpts. `evaluateToolCall` / `evaluate_tool_call` applies a
+`ToolPolicy` (allow/deny, side-effect tools after untrusted input, argument
+rules, host allow-list) → `tool_call_gated`; wrappers check `tool_use` /
+`tool_calls` / `function_call` on every response and strip BLOCKED calls
+when `enforceToolPolicy` is on. `createShield(config)` / `create_shield`
+gives an instance with its own app label, thresholds, secrets, output and
+tool policy, sinks, redaction (`excerpt|hash|none`) and recent buffer;
+events forward to the module bus (and the JSONL log) by default. Wrappers
+take `shield:` to share one. Events carry `direction`. `shield status`
+counts output flags and gated tool calls. Files: `src/output.ts`,
+`src/instance.ts`, `python/shield/output.py`, `python/shield/instance.py`.
+
+**Previously (v1.5.0):** See `docs/REVIEW-2026-09.md` for the
 review that drove this release and for what's still open (the output-side
 pipeline and the `createShield(config)` instance API from §2/§4 of that doc).
 
@@ -116,6 +134,8 @@ All events from every app (TS + Python) land in `~/.shield/events.jsonl`.
 |---|---|
 | `src/shield.ts` | core: patterns, normalization, wrap/sanitize, harden/canary, announce, event bus |
 | `src/coverage.ts` | deny-by-default proxy + `ShieldCoverageError` for the wrappers |
+| `src/output.ts` | output-side detectors (secrets/PII/exfil/echo) + tool-call policy |
+| `src/instance.ts` | `createShield(config)` instance: sinks, redaction, output/tool policy |
 | `src/index.browser.ts` | browser entry (no fs/child_process) — `browser` export condition |
 | `src/client-anthropic.ts` | drop-in Anthropic wrapper (duck-typed, no SDK import) |
 | `src/client-openai.ts` | drop-in OpenAI-compatible wrapper (chat.completions + responses) |
@@ -123,9 +143,9 @@ All events from every app (TS + Python) land in `~/.shield/events.jsonl`.
 | `src/headless.ts` | automation-process signatures + scanner (`python/shield/headless.py` mirrors) |
 | `src/react.ts` | `ShieldProvider` / `useInjectionScan` hook |
 | `bin/shield-cli.ts` | CLI: `logs`, `status`, `scan`, `clear` |
-| `test/*.test.ts` | node:test suites (90 tests) — `npm test` |
+| `test/*.test.ts` | node:test suites (106 tests) — `npm test` |
 | `python/shield/` | Python port, same API in snake_case |
-| `python/tests/` | unittest suites (72 tests) — `cd python && python3 -m unittest discover -s tests` |
+| `python/tests/` | unittest suites (86 tests) — `cd python && python3 -m unittest discover -s tests` |
 | `~/Projects/shield-sync.sh` | manual sync → group-chat (see below) |
 
 **Parity rule:** every behavior change lands in BOTH languages and both
@@ -173,30 +193,49 @@ exactly like no protection.* Hence banners + heartbeats + central status.
 
 ## pending / immediate next steps
 
-1. **Push group-chat** — sync commit `36e144d` is local-only.
-2. **Run bulwork and voicelogger once** — heartbeats fire at app startup,
-   not install, so `shield status` shows "never announced" for them until
-   their first post-rebuild run. After that, any "never announced" warning
-   is a real alarm.
+1. **Consumers need a rebuild for v1.6.0** — bulwork / voicelogger-cli
+   (`npm install` + build), group-chat (`shield-sync.sh`), wearabLLM (live
+   import, nothing to do). `shield status` flags anything still on 1.5.x.
+   Once rebuilt, pass a `createShield({...})` instance with each app's
+   `secrets`, `output.allowedHosts` and `toolPolicy` — the defaults scan
+   but gate nothing (no policy ⇒ every tool call allowed, no allow-list ⇒
+   plain links aren't findings).
+2. **Run bulwork and voicelogger once** after rebuilding — heartbeats fire
+   at app startup, so `shield status` shows "never announced" until then.
 3. Optional: add `npx shield status` to shell profile for a login-time
    nudge (read-only — safe to automate, unlike the old cron).
 
 ---
 
-## roadmap (discussed, not started)
+## outstanding (from the September review, not yet done)
 
-- **Tool-call/output-side policy** — the biggest gap. Shield only guards
-  input + canary today; nothing constrains what a model *does* after
-  reading untrusted content (tool calls, exfiltration). This is where real
-  damage happens in agentic apps.
+- **Semantic detector slot** — a pluggable `Detector` interface behind
+  `scanInput` / `scanOutput` so an app can add a cheap classifier or an
+  LLM-judge call (off by default). The regex layer is a tripwire;
+  paraphrase and translation still evade it.
+- **Detection benchmark** — precision/recall of the regex layer against a
+  public injection corpus plus a benign chat corpus, run in CI and failed
+  on regression. Until this exists the weights are tuned by hand.
+- **Refusal telemetry** — an output detector for "the model says it was
+  asked to do something it refused"; useful as a probing signal.
+- **Per-tool argument schemas** — `ToolPolicy` matches arguments by regex;
+  a per-tool JSON-schema (or validator fn) would be stronger for
+  path/URL/shell arguments.
+- **Streaming tool-call enforcement** — blocked calls are only stripped
+  from non-streaming responses; on helper streams they are logged
+  (`tool_call_gated`) but the caller still sees them.
+- **Anthropic `document` blocks** are scanned but not wrapped; PDF/base64
+  sources aren't inspected at all.
+- **Split entry points / publish** — `/node`, `/react`, `/anthropic`,
+  `/openai` subpaths and real npm/PyPI names; today everything ships under
+  `@local/shield` and installs via `file:`.
+- **Lint + type-check in CI** — no eslint, no mypy/pyright; the code is
+  annotated but nothing enforces it.
 - **Toolkit docs** (`docs/` playbook): threat model; the "lethal trifecta"
   rule (untrusted input + private data + exfiltration channel); MCP/plugin
   hygiene — the carta-cap-table plugin injecting `<EXTREMELY_IMPORTANT>`
   directives into Claude sessions is the motivating case study; personal
   opsec basics.
-- **Detection benchmarking** — measure the regex layer's honest catch rate
-  against a public injection-payload corpus; document it as telemetry, not
-  a gate.
 - **Startup self-check** — beyond announcing, verify the boilerplate
   actually reached the system prompt (e.g. a cheap round-trip assertion).
 - **Audit connected surface** in Claude/MCP sessions — every connector is

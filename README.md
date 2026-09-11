@@ -12,6 +12,10 @@ Prompt injection defense library. Plugs into TypeScript and Python apps that cal
 
 **Log** — All shield events (detections, canary leaks, blocked messages) go through an in-process event bus (`onShieldEvent` / `on_event`, with `replay` for late subscribers) and, by default, append to `~/.shield/events.jsonl` (override with `SHIELD_LOG_DIR`), shared across TS and Python apps. The client wrappers wire the file sink themselves under Node, writes are synchronous, and events emitted before the sink attached are replayed — so a script that exits right after a detection, or an app that constructs its client before calling `initFileLogger()`, no longer loses events. Query with the CLI. The log holds snippets of flagged user content, so the dir/file are created owner-only (`0700`/`0600`; older installs are tightened on first write). The CLI strips terminal control and bidi-override characters from logged text before printing, so a flagged payload can't smuggle ANSI escape codes into your terminal when you review events.
 
+**Watch the output** — The other half. Every response that passes through a wrapper (or `shield.scanOutput(text)` directly) is scanned for leaked credentials (AWS/GitHub/OpenAI/Anthropic/Slack/Google/Stripe key shapes, JWTs, private-key blocks, connection strings, generic `api_key=` assignments, plus any app-specific values you register as `secrets`), PII (email, phone, SSN, Luhn-valid card numbers, IBAN), exfiltration channels (markdown/HTML image beacons and URLs with opaque query strings to hosts outside your `allowedHosts`, `mailto:`), and *echo* (the model reproducing an instruction the input scan flagged). Findings emit `output_flagged` with masked excerpts; registered secrets are never written to a log.
+
+**Gate tool calls** — Requested tool calls (`tool_use` blocks, chat `tool_calls`, Responses `function_call` items) are evaluated against a `toolPolicy`: allow/deny lists, side-effecting tools requested after untrusted input was seen (the "lethal trifecta" precondition), argument rules, and host allow-lists for URLs in arguments. Decisions emit `tool_call_gated`; with `enforceToolPolicy: true` the wrapper strips *blocked* calls from non-streaming responses. `shield.checkToolCall(call, ctx)` does the same for your own agent loop.
+
 **Announce** — Client wrappers print a one-line startup banner and emit a `shield_started` heartbeat (with the library version) on construction, so a protected app *visibly says so* — and `shield status` can spot apps that have gone quiet or run a stale copy.
 
 **Watch** — `shield headless` scans running processes for browser automation (headless Chromium, `--remote-debugging-port`, Playwright, Puppeteer, WebDriver, Selenium, Cypress, PhantomJS) and logs each detection as a `headless_detected` event. `--watch` keeps polling. A headless browser you didn't start is exactly the kind of mysterious activity worth an event.
@@ -83,6 +87,40 @@ const completion = await client.chat.completions.create({ ... });   // also .par
 const response = await client.responses.create({ instructions, input }); // Responses API: also .parse / .stream
 ```
 
+### Instances: `createShield(config)`
+
+For anything beyond one app on one laptop, build an instance and hand it to the wrappers. It owns its config, sinks and event buffer; events still forward to the shared log unless you say otherwise.
+
+```ts
+import { createShield, shieldAnthropic } from '@local/shield';
+
+const shield = createShield({
+  app: 'support-bot',
+  secrets: [process.env.DB_PASSWORD!],            // never emitted, never logged
+  output: { allowedHosts: ['example.com'] },       // links elsewhere with opaque queries ⇒ exfil:beacon-url
+  toolPolicy: {
+    deny: ['run_shell'],
+    sideEffects: ['send_email', 'http_post'],      // flagged when requested after untrusted input
+    blockSideEffectsAfterUntrusted: true,
+    argumentRules: [{ pattern: /\.\.\//, action: 'block', reason: 'path traversal' }],
+    allowedHosts: ['api.example.com'],
+  },
+  redact: 'hash',                                  // log a hash of excerpts instead of user content
+  sinks: [(ev) => otel.emit(ev)],                  // console, webhook, OpenTelemetry…
+  forwardToGlobal: true,                           // default: also reaches ~/.shield/events.jsonl
+});
+
+const client = shieldAnthropic(new Anthropic(), { shield, enforceToolPolicy: true });
+
+// Or use the pipeline in your own loop:
+const inScan  = shield.scanInput(pageText, { channel: 'tool_result' });
+const outScan = shield.scanOutput(reply, { inputScans: [inScan] });
+const verdict = shield.checkToolCall({ name: 'send_email', input: args }, { untrustedInputSeen: true });
+if (verdict.decision === 'block') { /* don't run it */ }
+```
+
+Python: `create_shield(app=..., secrets=[...], allowed_hosts=[...], tool_policy=ToolPolicy(...), sinks=[...])` and `shield_anthropic(client, shield=sh, enforce_tool_policy=True)`; `sh.scan_input / scan_output / check_tool_call`.
+
 ### Coverage is deny-by-default
 
 A protection that silently doesn't apply looks exactly like no protection, so
@@ -148,7 +186,7 @@ safe = wrap_untrusted(user_text, "voice_transcript")
 ```bash
 npx shield logs              # tail ~/.shield/events.jsonl
 npx shield logs --limit 20
-npx shield logs --type injection_detected
+npx shield logs --type injection_detected   # or output_flagged, tool_call_gated, canary_leaked …
 npx shield logs --source bulwork
 npx shield status            # per-app health, version drift, gone-quiet apps
 npx shield headless          # one-shot scan for browser automation processes
@@ -227,7 +265,8 @@ All events share `~/.shield/events.jsonl` — Python and TypeScript apps write t
 ```jsonc
 {
   "timestamp": "2026-06-28T16:00:00.000Z",
-  "type": "injection_detected" | "canary_leaked" | "trigger_stripped" | "shield_started" | "headless_detected",
+  "type": "injection_detected" | "canary_leaked" | "output_flagged" | "tool_call_gated" | "trigger_stripped" | "shield_started" | "headless_detected",
+  "direction": "input" | "output" | "tool",  // v1.6+, which side of the model the event concerns
   "source": "bulwork",                  // app label; ":tool_result" qualifier when the hit came via a tool result
   "score": 0.9,                         // 0–1 risk score (injection events)
   "patterns": ["ignore-instructions"],  // matched pattern labels
