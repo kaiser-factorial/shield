@@ -229,20 +229,20 @@ export function scanOutput(text: string, ctx: OutputScanContext = {}): OutputSca
       findings.push({ label: `exfil:${label}`, category: "exfil", weight, excerpt: excerptAt(scanned, index, length), index });
     };
     for (const m of scanned.matchAll(MD_IMAGE_RE)) {
-      const host = m[1]!.replace(/^(?:https?:)?\/\//, "").split(/[/?#:]/)[0]!;
-      report(hostAllowed(host, ctx.allowedHosts) ? "markdown-image" : "markdown-image-beacon", hostAllowed(host, ctx.allowedHosts) ? 0.3 : 0.85, m.index!, m[0].length);
+      const host = m[1].replace(/^(?:https?:)?\/\//, "").split(/[/?#:]/)[0];
+      report(hostAllowed(host, ctx.allowedHosts) ? "markdown-image" : "markdown-image-beacon", hostAllowed(host, ctx.allowedHosts) ? 0.3 : 0.85, m.index, m[0].length);
     }
     for (const m of scanned.matchAll(HTML_IMG_RE)) {
-      const host = m[1]!.replace(/^(?:https?:)?\/\//, "").split(/[/?#:]/)[0]!;
-      if (!hostAllowed(host, ctx.allowedHosts)) report("html-image-beacon", 0.85, m.index!, m[0].length);
+      const host = m[1].replace(/^(?:https?:)?\/\//, "").split(/[/?#:]/)[0];
+      if (!hostAllowed(host, ctx.allowedHosts)) report("html-image-beacon", 0.85, m.index, m[0].length);
     }
     for (const m of scanned.matchAll(URL_RE)) {
-      const host = m[1]!;
+      const host = m[1];
       if (hostAllowed(host, ctx.allowedHosts)) continue;
-      if (opaqueQuery(m[2])) report("beacon-url", 0.8, m.index!, m[0].length);
-      else if (ctx.allowedHosts && ctx.allowedHosts.length > 0) report("unlisted-host", 0.4, m.index!, m[0].length);
+      if (opaqueQuery(m[2])) report("beacon-url", 0.8, m.index, m[0].length);
+      else if (ctx.allowedHosts && ctx.allowedHosts.length > 0) report("unlisted-host", 0.4, m.index, m[0].length);
     }
-    for (const m of scanned.matchAll(MAILTO_RE)) report("mailto", 0.4, m.index!, m[0].length);
+    for (const m of scanned.matchAll(MAILTO_RE)) report("mailto", 0.4, m.index, m[0].length);
   }
 
   // 5. refusal / self-report — telemetry on its own, a real signal next to a
@@ -318,6 +318,28 @@ export interface ToolCall {
   id?: string;
 }
 
+/**
+ * Thrown when a blocked tool call is assembled from a stream under
+ * `enforceToolPolicy`.
+ *
+ * On a non-streaming response the wrapper strips the blocked block and the
+ * caller simply never sees it. A stream has already handed the caller earlier
+ * events by the time the call completes, so there is nothing to strip —
+ * ending the iteration loudly is the only way to stop the call being acted
+ * on. Catch it to fall back; letting it propagate is the safe default.
+ */
+export class ShieldBlockedToolError extends Error {
+  readonly call: ToolCall;
+  readonly reasons: string[];
+
+  constructor(call: ToolCall, reasons: string[]) {
+    super(`shield blocked tool call "${call.name}" mid-stream: ${reasons.join("; ")}`);
+    this.name = "ShieldBlockedToolError";
+    this.call = call;
+    this.reasons = reasons;
+  }
+}
+
 export interface ToolCallContext {
   /** True when this turn's context contained untrusted content (tool results,
    *  documents, fetched pages) — the "lethal trifecta" precondition. */
@@ -347,10 +369,180 @@ export interface ToolPolicy {
   blockSideEffectsAfterUntrusted?: boolean;
   /** Argument-level rules (URLs to unknown hosts, shell metacharacters, paths). */
   argumentRules?: ToolArgumentRule[];
+  /** Per-tool argument schemas. Stronger than `argumentRules` for the shapes
+   *  that matter — a regex over serialized JSON cannot tell which field it
+   *  matched, and cannot notice an argument that should not be there at all. */
+  schemas?: ToolSchema[];
   /** Hosts tool arguments may reference; any other URL in arguments is flagged
    *  (blocked when `blockUnlistedHosts`). */
   allowedHosts?: string[];
   blockUnlistedHosts?: boolean;
+}
+
+
+// ── per-tool argument schemas ────────────────────────────────────────────────
+
+/**
+ * A constraint on one tool argument.
+ *
+ * This is deliberately not JSON Schema. Shield ships no dependencies, and a
+ * full validator would be a large surface for the sake of keywords that do
+ * nothing for security. What is here is the set that stops the arguments an
+ * injected model actually reaches for: a path that escapes its directory, a
+ * URL pointing at someone else's host, a free-form string where an enum was
+ * expected, a number outside its range.
+ */
+export interface ToolParamSchema {
+  type?: "string" | "number" | "integer" | "boolean" | "object" | "array";
+  /** Allowed values; anything else is a violation. */
+  enum?: ReadonlyArray<string | number | boolean>;
+  /** Strings must match. Keep it bounded — this runs on model output. */
+  pattern?: RegExp;
+  maxLength?: number;
+  minimum?: number;
+  maximum?: number;
+  /** Extra checks for the three argument shapes that carry real risk. */
+  format?: "url" | "email" | "path";
+  /** For format "url": hosts this argument may reference. */
+  allowedHosts?: string[];
+  /** For format "path": allow absolute paths (default false). */
+  allowAbsolute?: boolean;
+  /** Element constraint for arrays. */
+  items?: ToolParamSchema;
+}
+
+export interface ToolSchema {
+  /** The tool these constraints apply to. */
+  tool: string;
+  properties?: Record<string, ToolParamSchema>;
+  required?: string[];
+  /** Reject arguments not named in `properties`. Defaults to TRUE: an
+   *  argument nobody declared is exactly how an extra `path` or `url` gets
+   *  smuggled into an otherwise ordinary call. */
+  additionalProperties?: boolean;
+  /** Severity of a violation (default "block" — a schema is an assertion
+   *  about what the tool accepts, not a suggestion). */
+  action?: "block" | "flag";
+}
+
+const TRAVERSAL_RE = /(?:^|[\\/])\.\.(?:[\\/]|$)/;
+
+function typeOf(v: unknown): string {
+  if (Array.isArray(v)) return "array";
+  if (v === null) return "null";
+  return typeof v;
+}
+
+/** Check one value; returns human-readable violations, empty when it passes. */
+function checkParam(name: string, value: unknown, schema: ToolParamSchema): string[] {
+  const out: string[] = [];
+  const actual = typeOf(value);
+
+  if (schema.type) {
+    const ok = schema.type === "integer"
+      ? actual === "number" && Number.isInteger(value)
+      : actual === schema.type;
+    if (!ok) {
+      // A type mismatch makes every other check meaningless — report it alone
+      // rather than piling on errors derived from the wrong type.
+      return [`"${name}" should be ${schema.type}, got ${actual}`];
+    }
+  }
+
+  if (schema.enum && !schema.enum.includes(value as string)) {
+    out.push(`"${name}" is not one of the allowed values`);
+  }
+
+  if (typeof value === "string") {
+    if (schema.maxLength !== undefined && value.length > schema.maxLength) {
+      out.push(`"${name}" is longer than ${schema.maxLength} characters`);
+    }
+    if (schema.pattern && !schema.pattern.test(value)) {
+      out.push(`"${name}" does not match the required pattern`);
+    }
+    if (schema.format === "path") {
+      // Check the raw string AND its percent-decoded form: %2e%2e%2f is the
+      // oldest way past a traversal check that only looks at literal dots.
+      let decoded = value;
+      try { decoded = decodeURIComponent(value); } catch { /* keep the raw form */ }
+      if (TRAVERSAL_RE.test(value) || TRAVERSAL_RE.test(decoded)) {
+        out.push(`"${name}" contains a path traversal segment`);
+      }
+      if (!schema.allowAbsolute && /^(?:[\\/]|[A-Za-z]:[\\/])/.test(value)) {
+        out.push(`"${name}" is an absolute path`);
+      }
+      if (value.includes("\u0000")) out.push(`"${name}" contains a NUL byte`);
+    }
+    if (schema.format === "url") {
+      const m = /^([a-z][a-z0-9+.-]*):/i.exec(value);
+      const scheme = m?.[1]?.toLowerCase();
+      if (!scheme || !["http", "https"].includes(scheme)) {
+        // file:, data: and javascript: in a tool argument are not typos.
+        out.push(`"${name}" is not an http(s) URL`);
+      } else if (schema.allowedHosts) {
+        const host = /^[a-z]+:\/\/([^/?#]+)/i.exec(value)?.[1]?.split("@").pop()?.split(":")[0];
+        if (!host || !hostAllowed(host, schema.allowedHosts)) {
+          out.push(`"${name}" references unlisted host ${host ?? "(unparseable)"}`);
+        }
+      }
+    }
+    if (schema.format === "email" && !/^[^\s@]+@[^\s@.]+\.[^\s@]+$/.test(value)) {
+      out.push(`"${name}" is not an email address`);
+    }
+  }
+
+  if (typeof value === "number") {
+    if (schema.minimum !== undefined && value < schema.minimum) out.push(`"${name}" is below ${schema.minimum}`);
+    if (schema.maximum !== undefined && value > schema.maximum) out.push(`"${name}" is above ${schema.maximum}`);
+  }
+
+  if (Array.isArray(value) && schema.items) {
+    value.forEach((el, i) => out.push(...checkParam(`${name}[${i}]`, el, schema.items!)));
+  }
+
+  return out;
+}
+
+/**
+ * Validate a call's arguments against its schema.
+ *
+ * Returns the violations; an empty array means it passed. Arguments that did
+ * not parse as JSON are themselves a violation: a schema that silently does
+ * not run is worse than no schema, because it reads as a check that passed.
+ */
+export function validateToolArguments(call: ToolCall, schema: ToolSchema): string[] {
+  const input = call.input;
+
+  if (typeof input === "string") {
+    return [`arguments did not parse as JSON, so the schema could not be applied`];
+  }
+  if (input === null || input === undefined) {
+    return schema.required?.length ? [`arguments are missing (${schema.required.join(", ")} required)`] : [];
+  }
+  if (typeOf(input) !== "object") {
+    return [`arguments should be an object, got ${typeOf(input)}`];
+  }
+
+  const args = input as Record<string, unknown>;
+  const out: string[] = [];
+  const props = schema.properties ?? {};
+
+  for (const name of schema.required ?? []) {
+    if (!(name in args) || args[name] === undefined) out.push(`"${name}" is required but missing`);
+  }
+
+  if (schema.additionalProperties === false || schema.additionalProperties === undefined) {
+    for (const name of Object.keys(args)) {
+      if (!(name in props)) out.push(`"${name}" is not a declared argument of ${call.name}`);
+    }
+  }
+
+  for (const [name, param] of Object.entries(props)) {
+    if (!(name in args) || args[name] === undefined) continue;
+    out.push(...checkParam(name, args[name], param));
+  }
+
+  return out;
 }
 
 export type ToolDecisionKind = "allow" | "flag" | "block";
@@ -393,9 +585,15 @@ export function evaluateToolCall(call: ToolCall, policy: ToolPolicy = {}, ctx: T
     if (rule.pattern.test(text)) escalate(rule.action, rule.reason ?? `argument rule matched: ${rule.pattern}`);
   }
 
+  for (const schema of policy.schemas ?? []) {
+    if (schema.tool !== call.name) continue;
+    const violations = validateToolArguments(call, schema);
+    for (const v of violations) escalate(schema.action ?? "block", `schema: ${v}`);
+  }
+
   if (policy.allowedHosts) {
     for (const m of text.matchAll(URL_RE)) {
-      if (!hostAllowed(m[1]!, policy.allowedHosts)) {
+      if (!hostAllowed(m[1], policy.allowedHosts)) {
         escalate(policy.blockUnlistedHosts ? "block" : "flag", `argument references unlisted host ${m[1]}`);
         break;
       }

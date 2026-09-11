@@ -350,6 +350,25 @@ export class Shield {
   }
 
   /** Evaluate a requested tool call against the policy; emits `tool_call_gated` unless allowed. */
+  /**
+   * Record content that reached the model without being scanned — a base64
+   * PDF, an image, a remote URL the SDK fetches server-side.
+   *
+   * This exists because the alternative is silence, and silence reads as
+   * "scanned, nothing found". A log that cannot distinguish "we checked and
+   * it was clean" from "we never opened it" is not a security log.
+   */
+  reportUnscanned(what: string, channel?: string): void {
+    this.emit({
+      type: "content_not_scanned",
+      source: this.source(channel),
+      detail: `not scanned: ${what}`.slice(0, 300),
+      score: 0,
+      patterns: ["coverage:not_scanned"],
+      direction: "input",
+    });
+  }
+
   checkToolCall(call: ToolCall, ctx: ToolCallContext = {}): ToolDecision {
     const d = evaluateToolCall(call, this.config.toolPolicy ?? {}, ctx);
     if (d.decision !== "allow") {

@@ -505,7 +505,10 @@ test("stream tap: a stream that errors mid-flight still canary-checks what it em
     },
   };
 
-  const tapped = tapEventStream(failing, (ev: unknown) => String(ev), (text: string) => { checked = text; });
+  const tapped = tapEventStream(failing, {
+    text: (ev: unknown) => String(ev),
+    onText: (text: string) => { checked = text; },
+  });
 
   await assert.rejects(async () => {
     for await (const _ of tapped) { void _; }

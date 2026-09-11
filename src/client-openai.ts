@@ -24,12 +24,17 @@ import {
   wrapUntrusted,
   type InjectionScan,
 } from "./shield.js";
-import { tapEventStream } from "./stream.js";
+import {
+  tapEventStream,
+  openAIChatToolAssembler,
+  openAIResponsesToolAssembler,
+  type ToolAssembler,
+} from "./stream.js";
 import { guarded, nestedPassthrough } from "./coverage.js";
 import { createShield, type Shield } from "./instance.js";
-import type { ToolCall } from "./output.js";
+import { ShieldBlockedToolError, type ToolCall } from "./output.js";
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 export interface OpenAICompletionsLike {
   create(params: any, options?: any): any;
   parse?(params: any, options?: any): any;
@@ -56,7 +61,7 @@ export interface ShieldedOpenAIResponses extends OpenAIResponsesLike {
   parse(params: any, options?: any): any;
   stream(params: any, options?: any): any;
 }
-/* eslint-enable @typescript-eslint/no-explicit-any */
+ 
 
 export interface ShieldOpenAIOptions {
   wrapUserMessages?: boolean;
@@ -93,7 +98,7 @@ const CHAT_ALLOW: readonly string[] = [];
 const COMPLETIONS_ALLOW = ["messages"] as const;
 const RESPONSES_ALLOW = ["inputItems", "retrieve", "delete", "cancel"] as const;
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function partsText(content: any, textTypes: readonly string[]): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -111,7 +116,7 @@ function partsText(content: any, textTypes: readonly string[]): string {
  * - array of parts: append the boilerplate as a NEW text part so existing
  *   parts are preserved instead of being flattened into one string.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function hardenSystemContent(content: any, fixedCanary?: string): { content: any; canary: string } {
   if (content == null || typeof content === "string") {
     const { prompt, canary } = hardenSystemPrompt(typeof content === "string" ? content : "", fixedCanary);
@@ -132,7 +137,7 @@ function hardenSystemContent(content: any, fixedCanary?: string): { content: any
  * Wrap the text of a message while PRESERVING non-text parts
  * (image_url, input_audio, file, …).
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function wrapContentText(content: any, label: string, textTypes: readonly string[] = ["text"]): any {
   if (typeof content === "string") return wrapUntrusted(content, label);
   if (Array.isArray(content)) {
@@ -146,7 +151,7 @@ function wrapContentText(content: any, label: string, textTypes: readonly string
 }
 
 /** Text carried by a streamed chat-completion chunk (create({stream:true})). */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function chatDeltaText(ev: any): string {
   const choices = ev?.choices;
   if (!Array.isArray(choices) || choices.length === 0) return "";
@@ -154,7 +159,7 @@ function chatDeltaText(ev: any): string {
 }
 
 /** Text carried by a Responses API stream event. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function responsesDeltaText(ev: any): string {
   return ev?.type === "response.output_text.delta" && typeof ev.delta === "string" ? ev.delta : "";
 }
@@ -164,7 +169,7 @@ function parseArgs(raw: unknown): unknown {
   try { return JSON.parse(raw); } catch { return raw; }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function chatToolCalls(response: any): ToolCall[] {
   if (!response || !Array.isArray(response.choices)) return [];
   const out: ToolCall[] = [];
@@ -176,7 +181,7 @@ function chatToolCalls(response: any): ToolCall[] {
   return out;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function stripChatToolCalls(response: any, blocked: Set<string | undefined>): any {
   return {
     ...response,
@@ -187,7 +192,7 @@ function stripChatToolCalls(response: any, blocked: Set<string | undefined>): an
   };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function responsesToolCalls(response: any): ToolCall[] {
   if (!response || !Array.isArray(response.output)) return [];
   return response.output
@@ -196,7 +201,7 @@ function responsesToolCalls(response: any): ToolCall[] {
       ({ name: it.name, input: parseArgs(it.arguments ?? it.input), id: it.call_id ?? it.id }));
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function stripResponsesToolCalls(response: any, blocked: Set<string | undefined>): any {
   return {
     ...response,
@@ -205,13 +210,13 @@ function stripResponsesToolCalls(response: any, blocked: Set<string | undefined>
   };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function chatCompletionText(response: any): string {
   if (!response || !Array.isArray(response.choices)) return "";
   return response.choices.map((c: { message?: { content?: string | null } }) => c?.message?.content ?? "").join("");
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function responseOutputText(response: any): string {
   if (!response || typeof response !== "object") return "";
   if (typeof response.output_text === "string" && response.output_text) return response.output_text;
@@ -232,12 +237,13 @@ function responseOutputText(response: any): string {
  * each keeps its own buffer and the fullest one is checked at the end, so a
  * delta reported under two names is never double-counted.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function observeHelperStream(
   stream: any,
   listeners: Array<{ name: string; extract: (arg: any) => string }>,
   iterExtract: (ev: any) => string,
   onDone: (text: string) => void,
+  tools?: { make: () => ToolAssembler; onToolCall: (call: ToolCall) => void },
 ): any {
   try {
     if (stream && typeof stream.on === "function") {
@@ -258,7 +264,11 @@ function observeHelperStream(
       return stream;
     }
   } catch { /* canary observation must never break streaming */ }
-  return tapEventStream(stream, iterExtract, onDone);
+  return tapEventStream(stream, {
+    text: iterExtract,
+    onText: onDone,
+    ...(tools ? { tools: tools.make, onToolCall: tools.onToolCall } : {}),
+  });
 }
 
 interface Prepared {
@@ -292,7 +302,7 @@ class OpenAIShield {
     this.shield.scanOutput(outputText, { canary: p.canary, inputScans: p.inputScans });
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   observeToolCalls(response: any, calls: ToolCall[], p: Pick<Prepared, "inputScans" | "untrustedInputSeen">, strip: ((r: any, b: Set<string | undefined>) => any) | null): any {
     if (calls.length === 0) return response;
     const blocked = new Set<string | undefined>();
@@ -302,6 +312,22 @@ class OpenAIShield {
     }
     if (!strip || !this.opts.enforceToolPolicy || blocked.size === 0) return response;
     return strip(response, blocked);
+  }
+
+  /**
+   * Evaluate a tool call assembled from a stream. Blocking a streamed call
+   * cannot mean stripping it — earlier events are already with the caller —
+   * so under enforcement it throws, ending the iteration before the call can
+   * be acted on. Without enforcement it is logged like any other gated call.
+   */
+  observeStreamToolCall(call: ToolCall, p: Pick<Prepared, "inputScans" | "untrustedInputSeen">): void {
+    const d = this.shield.checkToolCall(call, {
+      untrustedInputSeen: p.untrustedInputSeen,
+      inputScans: p.inputScans,
+    });
+    if (d.decision === "block" && this.opts.enforceToolPolicy) {
+      throw new ShieldBlockedToolError(call, d.reasons);
+    }
   }
 
   // ── chat.completions ──────────────────────────────────────────────────────
@@ -352,7 +378,14 @@ class OpenAIShield {
     const p = this.prepareChat(params);
     const response = await this.completions().create(p.prepared, options);
     if (params["stream"] === true && !(response && typeof response === "object" && "choices" in response)) {
-      return tapEventStream(response, chatDeltaText, (text) => this.observeOutput(text, p));
+      // A raw stream carries tool calls in fragments; rebuild and evaluate
+      // each one as it completes, which is before the caller can act on it.
+      return tapEventStream(response, {
+        text: chatDeltaText,
+        tools: openAIChatToolAssembler,
+        onText: (text) => this.observeOutput(text, p),
+        onToolCall: (call) => this.observeStreamToolCall(call, p),
+      });
     }
     this.observeOutput(chatCompletionText(response), p);
     return this.observeToolCalls(response, chatToolCalls(response), p, stripChatToolCalls);
@@ -439,7 +472,12 @@ class OpenAIShield {
     const p = this.prepareResponses(params);
     const response = await this.responses().create(p.prepared, options);
     if (params["stream"] === true && !(response && typeof response === "object" && "output" in response)) {
-      return tapEventStream(response, responsesDeltaText, (text) => this.observeOutput(text, p));
+      return tapEventStream(response, {
+        text: responsesDeltaText,
+        tools: openAIResponsesToolAssembler,
+        onText: (text) => this.observeOutput(text, p),
+        onToolCall: (call) => this.observeStreamToolCall(call, p),
+      });
     }
     this.observeOutput(responseOutputText(response), p);
     return this.observeToolCalls(response, responsesToolCalls(response), p, stripResponsesToolCalls);

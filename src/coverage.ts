@@ -32,7 +32,7 @@ export interface GuardSpec {
   /** Dotted path for error messages, e.g. "client.chat.completions". */
   path: string;
   /** Attribute → factory for its shielded replacement (memoized per proxy). */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   intercept: Record<string, (inner: any) => unknown>;
   /** Attributes forwarded unchanged: known not to carry prompts to a model. */
   allow: readonly string[];
@@ -50,7 +50,7 @@ export interface GuardSpec {
  */
 export function guarded<T extends object>(inner: T, spec: GuardSpec): T {
   const cache = new Map<string, unknown>();
-  const passthrough = new Set((spec.passthrough ?? []).map((p) => p.split(".")[0]!));
+  const passthrough = new Set((spec.passthrough ?? []).map((p) => p.split(".")[0]));
 
   return new Proxy(inner, {
     get(target, prop, receiver) {
@@ -60,7 +60,7 @@ export function guarded<T extends object>(inner: T, spec: GuardSpec): T {
       if (prop === "constructor" || prop === "toJSON" || prop === "toString") return Reflect.get(target, prop, target);
 
       if (Object.prototype.hasOwnProperty.call(spec.intercept, prop)) {
-        if (!cache.has(prop)) cache.set(prop, spec.intercept[prop]!(target));
+        if (!cache.has(prop)) cache.set(prop, spec.intercept[prop](target));
         return cache.get(prop);
       }
 

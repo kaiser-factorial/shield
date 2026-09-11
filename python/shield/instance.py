@@ -334,6 +334,24 @@ class Shield:
         self._emit_output(text, scan, canary)
         return scan
 
+    def report_unscanned(self, what: str, *, channel: Optional[str] = None) -> None:
+        """
+        Record content that reached the model without being scanned — a base64
+        PDF, an image, a remote URL the SDK fetches server-side.
+
+        This exists because the alternative is silence, and silence reads as
+        "scanned, nothing found". A log that cannot distinguish "we checked
+        and it was clean" from "we never opened it" is not a security log.
+        """
+        self.emit(
+            "content_not_scanned",
+            source=self._source(channel),
+            detail=f"not scanned: {what}"[:300],
+            score=0,
+            patterns=["coverage:not_scanned"],
+            direction="input",
+        )
+
     def check_tool_call(
         self,
         call: ToolCall,
