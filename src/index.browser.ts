@@ -51,6 +51,18 @@ export {
 } from "./client-openai.js";
 export { ShieldCoverageError } from "./coverage.js";
 
+// Pluggable detectors (semantic slot)
+export {
+  runDetectors,
+  runDetectorsAsync,
+  combineScore,
+  type Detector,
+  type DetectorContext,
+  type DetectorFinding,
+  type DetectorRun,
+  type DetectorSide,
+} from "./detectors.js";
+
 // Output-side pipeline + tool-call policy
 export {
   scanOutput,

@@ -18,7 +18,7 @@ import { detectInjection, outputLeakedCanary, type InjectionScan } from "./shiel
 
 // ── findings ─────────────────────────────────────────────────────────────────
 
-export type OutputCategory = "canary" | "secret" | "pii" | "exfil" | "echo" | "custom";
+export type OutputCategory = "canary" | "secret" | "pii" | "exfil" | "echo" | "refusal" | "custom";
 
 export interface OutputFinding {
   /** e.g. "secret:aws-access-key", "pii:email", "exfil:beacon-url", "echo:ignore-instructions" */
@@ -123,6 +123,26 @@ export const PII_PATTERNS: readonly PiiPattern[] = [
   { label: "iban",         re: /\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){3,7}[ ]?[A-Z0-9]{1,4}\b/, weight: 0.6 },
 ];
 
+// ── refusal ──────────────────────────────────────────────────────────────────
+
+/**
+ * The model declining, or reporting that it was asked to do something it
+ * shouldn't. On its own this is ordinary and harmless — models refuse all
+ * day — so the weight sits below the flag threshold and it only surfaces in
+ * combination. What makes it worth recording is the pairing: a refusal in
+ * the same turn that untrusted content was flagged is the shape of a probe
+ * that the model caught and the pattern layer only half-saw.
+ */
+const REFUSAL_PATTERNS: ReadonlyArray<{ label: string; re: RegExp }> = [
+  { label: "declined",        re: /\bI\s+(?:can(?:'|’)?t|cannot|am\s+unable\s+to|won(?:'|’)?t|will\s+not)\b[^.!?\n]{0,60}?\b(?:help|assist|comply|do\s+that|provide|share|reveal|continue|follow)\b/i },
+  { label: "apologetic",      re: /\bI(?:'|’)?m\s+(?:sorry|afraid)\b[^.!?\n]{0,40}?\b(?:can(?:'|’)?t|cannot|unable|not\s+able)\b/i },
+  { label: "must-decline",    re: /\bI\s+(?:must|have\s+to|will)\s+(?:decline|refuse)\b/i },
+  { label: "against-policy",  re: /\b(?:that|this|it)\s+(?:would\s+)?(?:violate|goes?\s+against|conflicts?\s+with)\b[^.!?\n]{0,40}?\b(?:polic|guideline|instruction|constraint)/i },
+  // The model naming the attack. High-signal on its own terms: it means the
+  // content carried instructions and the model noticed.
+  { label: "reported-injection", re: /\b(?:this|the)\s+(?:message|text|content|page|document|tool\s+result|input)\b[^.!?\n]{0,60}?\b(?:appears\s+to\s+)?(?:contain|include)s?\b[^.!?\n]{0,40}?\b(?:prompt\s+injection|injected\s+instruction|hidden\s+instruction|embedded\s+instruction)/i },
+];
+
 // ── exfiltration ─────────────────────────────────────────────────────────────
 
 const URL_RE = /\b(?:https?:)?\/\/([A-Za-z0-9.-]{1,253})(?::\d{1,5})?(\/[^\s)<>"'\]]{0,2048})?/g;
@@ -225,7 +245,25 @@ export function scanOutput(text: string, ctx: OutputScanContext = {}): OutputSca
     for (const m of scanned.matchAll(MAILTO_RE)) report("mailto", 0.4, m.index!, m[0].length);
   }
 
-  // 5. echo of injected instructions — the model complied with something
+  // 5. refusal / self-report — telemetry on its own, a real signal next to a
+  //    flagged input.
+  if (on("refusal")) {
+    const afterFlagged = ctx.inputScans?.some((s) => s.flagged) ?? false;
+    for (const p of REFUSAL_PATTERNS) {
+      const m = p.re.exec(scanned);
+      if (!m) continue;
+      findings.push({
+        label: afterFlagged ? `refusal:${p.label}:after-flagged-input` : `refusal:${p.label}`,
+        category: "refusal",
+        weight: afterFlagged ? 0.7 : 0.35,
+        excerpt: excerptAt(scanned, m.index, m[0].length),
+        index: m.index,
+      });
+      break; // one refusal finding is enough for triage
+    }
+  }
+
+  // 6. echo of injected instructions — the model complied with something
   //    an input scan flagged.
   if (on("echo") && ctx.inputScans && ctx.inputScans.length > 0) {
     // A pattern that fired on the input firing again on the output means the

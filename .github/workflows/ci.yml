@@ -34,6 +34,12 @@ jobs:
       - name: Test
         run: node --test dist/test/*.test.js
 
+      # Printed as its own step so the precision/recall report is readable in
+      # the log without scrolling the full test output. The floor is enforced
+      # by the test above either way.
+      - name: Detection benchmark
+        run: node --test dist/test/benchmark.test.js
+
       - name: Versions in sync (TS ↔ Python)
         run: npm run check:versions
 
@@ -51,4 +57,8 @@ jobs:
 
       - name: Test
         run: python -m unittest discover -s tests -v
+        working-directory: python
+
+      - name: Detection benchmark
+        run: python -m unittest tests.test_benchmark -v
         working-directory: python

@@ -14,7 +14,7 @@
  * (a test enforces the package.json half). Announced in startup banners and
  * heartbeat events so `shield status` can flag apps running stale copies.
  */
-export const SHIELD_VERSION = "1.6.0";
+export const SHIELD_VERSION = "1.7.0";
 
 // ── 1. DETECT ────────────────────────────────────────────────────────────────
 
@@ -59,9 +59,13 @@ const TAG_BREAKOUT_SRC =
 
 const INJECTION_PATTERNS: Array<{ label: string; re: RegExp; weight: number }> = [
   // Classic override attempts
-  { label: "ignore-instructions",   re: /ignore\s+(all\s+)?(previous|prior|above|your)\s+(instructions?|rules?|prompts?|directives?)/i, weight: 0.9 },
+  // The determiner and qualifier slots are bounded repeats, not `*`: the
+  // benchmark corpus showed "ignore THE ABOVE instructions" and "disregard
+  // YOUR PRIOR rules" slipping past a single-slot pattern, and an unbounded
+  // group here would reintroduce the ReDoS this file spent v1.5 removing.
+  { label: "ignore-instructions",   re: /ignore\s+(?:all\s+|the\s+|any\s+){0,3}(?:previous|prior|above|earlier|preceding|your|users?'?s?)\s+(?:\w+\s+){0,2}(?:instructions?|rules?|prompts?|directives?|guidance|questions?|requests?)/i, weight: 0.9 },
   { label: "forget-instructions",   re: /forget\s+(everything|all\s+instructions?|your\s+instructions?)/i, weight: 0.9 },
-  { label: "disregard-instructions",re: /disregard\s+(all\s+)?(previous|prior|your)\s+(instructions?|rules?)/i, weight: 0.85 },
+  { label: "disregard-instructions",re: /disregard\s+(?:all\s+|the\s+|any\s+){0,3}(?:previous|prior|above|earlier|preceding|your)\s+(?:\w+\s+){0,2}(?:instructions?|rules?|directives?|guidance)/i, weight: 0.85 },
   { label: "new-instructions",      re: /new\s+(instructions?|directive|rules?|orders?)\s*:/i, weight: 0.75 },
   { label: "override-instructions", re: /override\s+(your\s+)?(instructions?|rules?|programming)/i, weight: 0.85 },
 
@@ -110,7 +114,7 @@ const INJECTION_PATTERNS: Array<{ label: string; re: RegExp; weight: number }> =
   // query string is the classic zero-click channel; "send/post this to" is the
   // explicit form.
   { label: "markdown-image-exfil",  re: /!\[[^\]\n]{0,200}\]\((?:https?:)?\/\/[^)\s]{1,300}\?[^)\s]{16,}\)/i, weight: 0.8 },
-  { label: "exfil-send-to",         re: /\b(send|post|email|forward|transmit|upload)\s+(this|it|them|the\s+(above|conversation|data|contents?|response|results?|history|document))\s+to\s+/i, weight: 0.6 },
+  { label: "exfil-send-to",         re: /\b(?:send|post|email|forward|transmit|upload)\s+(?:this|it|them|the\s+(?:\w+\s+){0,2}(?:above|conversation|data|contents?|response|results?|history|document|summary|transcript|details?))\s+to\s+/i, weight: 0.6 },
 
   // Boundary breakout — content trying to open/close shield's <untrusted_*>
   // wrapper tags to escape the trust boundary. Scan raw text BEFORE wrapping;

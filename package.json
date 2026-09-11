@@ -1,6 +1,6 @@
 {
   "name": "@local/shield",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Prompt injection defense utilities — detect, wrap, harden, log",
   "type": "module",
   "main": "./dist/src/index.js",
@@ -40,7 +40,9 @@
     "test": "tsc && node --test dist/test/*.test.js && npm run check:versions",
     "logs": "node dist/bin/shield-cli.js logs",
     "scan": "node dist/bin/shield-cli.js scan",
-    "check:versions": "node scripts/check-versions.mjs"
+    "check:versions": "node scripts/check-versions.mjs",
+    "bench": "tsc && node --test dist/test/benchmark.test.js",
+    "bench:corpus": "node scripts/make-corpus.mjs"
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.20",

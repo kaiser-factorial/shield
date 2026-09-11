@@ -1,0 +1,7 @@
+{
+  "precision": 0.90,
+  "recall": 0.72,
+  "f1": 0.80,
+  "measured": { "precision": 0.932, "recall": 0.745, "f1": 0.828, "on": "bench/corpus.jsonl @ 101 samples, shield 1.7.0" },
+  "note": "FLOORS, not targets. Set just under the measured values so ordinary tuning has headroom but a real regression fails CI. Raise them when a change genuinely raises the measurement; never lower them to make a build pass."
+}

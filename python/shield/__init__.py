@@ -42,6 +42,13 @@ from .output import (
     PII_PATTERNS,
 )
 from .instance import Shield, create_shield, get_default_shield
+from .detectors import (
+    Detector,
+    DetectorContext,
+    DetectorFinding,
+    run_detectors,
+    run_detectors_async,
+)
 
 __version__ = SHIELD_VERSION
 
@@ -88,4 +95,9 @@ __all__ = [
     "Shield",
     "create_shield",
     "get_default_shield",
+    "Detector",
+    "DetectorContext",
+    "DetectorFinding",
+    "run_detectors",
+    "run_detectors_async",
 ]

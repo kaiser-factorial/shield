@@ -4,7 +4,7 @@ Prompt injection defense library. Plugs into TypeScript and Python apps that cal
 
 ## What it does
 
-**Detect** — 30 regex patterns covering role-hijacking, instruction override, jailbreaks, system-prompt exposure, chat-delimiter spoofing, exfiltration setup (markdown-image beacons, "send this to…"), indirect injection markers, and untrusted-tag breakout attempts. Input is normalized first (NFKC, zero-width characters stripped, letter-spaced words rejoined) so `ig​nore`, fullwidth `ｉｇｎｏｒｅ`, and `i-g-n-o-r-e` don't slip past. Every pattern is bounded (linear time on adversarial whitespace — see v1.5.0 notes) and inputs over 512 KB are head/tail-scanned with `truncated: true`. Returns a severity score, matched patterns, and per-match excerpts (±60 chars of context, line number, offset) so flagged events are triageable even when the payload is buried deep in a long page. It is a tripwire, not a gate: translation, encoding, and paraphrase still evade it.
+**Detect** — 30 regex patterns covering role-hijacking, instruction override, jailbreaks, system-prompt exposure, chat-delimiter spoofing, exfiltration setup (markdown-image beacons, "send this to…"), indirect injection markers, and untrusted-tag breakout attempts. Input is normalized first (NFKC, zero-width characters stripped, letter-spaced words rejoined) so `ig​nore`, fullwidth `ｉｇｎｏｒｅ`, and `i-g-n-o-r-e` don't slip past. Every pattern is bounded (linear time on adversarial whitespace — see v1.5.0 notes) and inputs over 512 KB are head/tail-scanned with `truncated: true`. Returns a severity score, matched patterns, and per-match excerpts (±60 chars of context, line number, offset) so flagged events are triageable even when the payload is buried deep in a long page. It is a tripwire, not a gate: translation, encoding, and paraphrase still evade it — measured at **93.2% precision / 74.5% recall** on the committed benchmark corpus, with a pluggable detector slot for what regexes can't reach.
 
 **Wrap** — Tags untrusted content (web pages, file uploads, voice transcripts, search results) with `<untrusted_*>` XML boundaries so the model treats it as data, not instructions. Content is sanitized first: any embedded `</untrusted_*>` sequence that could close the boundary early (including case, whitespace, zero-width padding, and fullwidth-bracket variants) is neutralized to `&lt;…`, and a `trigger_stripped` event is logged. Labels are normalized to `[a-z0-9_]` so a caller-supplied label can't forge markup.
 
@@ -12,7 +12,7 @@ Prompt injection defense library. Plugs into TypeScript and Python apps that cal
 
 **Log** — All shield events (detections, canary leaks, blocked messages) go through an in-process event bus (`onShieldEvent` / `on_event`, with `replay` for late subscribers) and, by default, append to `~/.shield/events.jsonl` (override with `SHIELD_LOG_DIR`), shared across TS and Python apps. The client wrappers wire the file sink themselves under Node, writes are synchronous, and events emitted before the sink attached are replayed — so a script that exits right after a detection, or an app that constructs its client before calling `initFileLogger()`, no longer loses events. Query with the CLI. The log holds snippets of flagged user content, so the dir/file are created owner-only (`0700`/`0600`; older installs are tightened on first write). The CLI strips terminal control and bidi-override characters from logged text before printing, so a flagged payload can't smuggle ANSI escape codes into your terminal when you review events.
 
-**Watch the output** — The other half. Every response that passes through a wrapper (or `shield.scanOutput(text)` directly) is scanned for leaked credentials (AWS/GitHub/OpenAI/Anthropic/Slack/Google/Stripe key shapes, JWTs, private-key blocks, connection strings, generic `api_key=` assignments, plus any app-specific values you register as `secrets`), PII (email, phone, SSN, Luhn-valid card numbers, IBAN), exfiltration channels (markdown/HTML image beacons and URLs with opaque query strings to hosts outside your `allowedHosts`, `mailto:`), and *echo* (the model reproducing an instruction the input scan flagged). Findings emit `output_flagged` with masked excerpts; registered secrets are never written to a log.
+**Watch the output** — The other half. Every response that passes through a wrapper (or `shield.scanOutput(text)` directly) is scanned for leaked credentials (AWS/GitHub/OpenAI/Anthropic/Slack/Google/Stripe key shapes, JWTs, private-key blocks, connection strings, generic `api_key=` assignments, plus any app-specific values you register as `secrets`), PII (email, phone, SSN, Luhn-valid card numbers, IBAN), exfiltration channels (markdown/HTML image beacons and URLs with opaque query strings to hosts outside your `allowedHosts`, `mailto:`), *echo* (the model reproducing an instruction the input scan flagged), and *refusal* (the model saying it was asked to do something it declined). A refusal on its own is weak signal and scores below the flag threshold; a refusal that follows a **flagged input** scores 0.7, because it is what a probe that nearly worked looks like from the outside. Findings emit `output_flagged` with masked excerpts; registered secrets are never written to a log, and any excerpt that would carry one is withheld.
 
 **Gate tool calls** — Requested tool calls (`tool_use` blocks, chat `tool_calls`, Responses `function_call` items) are evaluated against a `toolPolicy`: allow/deny lists, side-effecting tools requested after untrusted input was seen (the "lethal trifecta" precondition), argument rules, and host allow-lists for URLs in arguments. Decisions emit `tool_call_gated`; with `enforceToolPolicy: true` the wrapper strips *blocked* calls from non-streaming responses. `shield.checkToolCall(call, ctx)` does the same for your own agent loop.
 
@@ -120,6 +120,82 @@ if (verdict.decision === 'block') { /* don't run it */ }
 ```
 
 Python: `create_shield(app=..., secrets=[...], allowed_hosts=[...], tool_policy=ToolPolicy(...), sinks=[...])` and `shield_anthropic(client, shield=sh, enforce_tool_policy=True)`; `sh.scan_input / scan_output / check_tool_call`.
+
+### Adding your own detection: `detectors`
+
+The pattern layer is a tripwire. It catches known phrasings and misses
+paraphrase, translation and anything novel — the benchmark below reports that
+honestly. The detector slot is where you add what regexes can't do: a local
+classifier, an embedding-similarity check, your own term list, an LLM judge.
+
+```ts
+import { createShield, type Detector } from '@local/shield';
+
+const termList: Detector = {
+  name: 'terms',
+  sides: ['input'],                                  // default: both sides
+  scan: (text) => text.includes('project raven')
+    ? [{ label: 'codename', weight: 0.8, excerpt: 'project raven' }]
+    : [],
+};
+
+const judge: Detector = {
+  name: 'judge',
+  sides: ['output'],
+  scan: async (text, ctx) => {                        // async: output side only
+    if (!ctx.baseline?.flagged) return [];            // skip the cheap-clear case
+    const verdict = await askSmallModel(text);
+    return verdict.bad ? [{ label: 'llm', weight: 0.7 }] : [];
+  },
+};
+
+const shield = createShield({ app: 'support-bot', detectors: [termList, judge] });
+```
+
+Findings arrive namespaced as `detector:<name>:<label>` in `scan.matches`, and
+combine with the pattern score the same way patterns combine with each other:
+the strongest signal wins, each extra signal adds a little.
+
+**Sync and async are not interchangeable, and the difference is deliberate.**
+Sync detectors run everywhere, including inside the SDK wrappers. Async ones
+run in `scanInputAsync` / `scanOutputAsync`, and on the output side are also
+fired off by `scanOutput`, arriving later as their own event — output scanning
+never gates anything, so a late answer is still useful. Input scanning feeds
+the tool-call decision, so `scanInput` **skips** async detectors and warns
+once rather than deciding without them. A detector that throws or rejects is
+reported and dropped; it never takes the scan down with it.
+
+Python is the same shape: `Detector(name=..., scan=fn, sides=("input",))` and
+`create_shield(detectors=[...])`, with `scan_input_async` / `scan_output_async`.
+
+### How good is the detection? `npm run bench`
+
+Measured, not asserted. `bench/corpus.jsonl` holds 101 hand-written samples —
+55 attacks across nine families, 46 benign of which 20 are deliberately
+attack-shaped ("Can you act as a translator?", "Disregard my last message, I
+pasted the wrong log"). Both test suites score the pattern layer against it
+and fail below the floors in `bench/baseline.json`.
+
+| metric | current | floor |
+|---|---|---|
+| precision | 93.2% | 90% |
+| recall | 74.5% | 72% |
+| F1 | 82.8% | 80% |
+
+Recall is well under 1.0 on purpose. The corpus includes translated,
+base64-encoded and purely paraphrased attacks that no regex catches, and a
+corpus-shape test blocks "improving" the score by deleting them. **Raise
+recall with a detector, not with a pattern that memorises the corpus.**
+
+```bash
+npm run bench                            # the report, with per-family misses
+npm run bench:corpus                     # regenerate corpus.jsonl after editing
+SHIELD_CORPUS=/path/to.jsonl npm run bench   # measure against your own corpus
+cd python && python3 -m unittest tests.test_benchmark -v
+```
+
+Both languages read the same corpus and the same floors, so the two
+implementations cannot drift apart without one of them failing.
 
 ### Coverage is deny-by-default
 
@@ -246,7 +322,7 @@ There is no auto-update — that was removed on purpose (see the sync section be
 
 ## Tests
 
-Both packages have zero-dependency test suites (Node's built-in runner / Python's `unittest`) covering the attack corpus, benign false-positive checks, tag-breakout attempts, and canary behavior:
+Both packages have zero-dependency test suites (Node's built-in runner / Python's `unittest`) covering the attack corpus, benign false-positive checks, tag-breakout attempts, canary behavior, the detector API, and the detection benchmark (118 TypeScript tests, 98 Python):
 
 ```bash
 # TypeScript (runs in CI on every push)
