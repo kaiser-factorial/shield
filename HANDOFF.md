@@ -37,9 +37,11 @@ take `shield:` to share one. Events carry `direction`. `shield status`
 counts output flags and gated tool calls. Files: `src/output.ts`,
 `src/instance.ts`, `python/shield/output.py`, `python/shield/instance.py`.
 
-**Previously (v1.5.0):** See `docs/REVIEW-2026-09.md` for the
-review that drove this release and for what's still open (the output-side
-pipeline and the `createShield(config)` instance API from §2/§4 of that doc).
+**Previously (v1.5.0):** See `docs/REVIEW-2026-09.md` for the review that
+drove this whole run of releases. Everything it raised has since shipped —
+§2 (`createShield`) and §4 (the output pipeline) in v1.6.0, the detection
+items in v1.7.0, the enforcement gaps in v1.8.0. Read it for the reasoning
+and the reproductions, not for open work.
 
 **v1.5.0 (review fixes):** two detection regexes were quadratic on
 whitespace (`system-colon`, `untrusted-tag-breakout`) — 40k newlines took
@@ -110,12 +112,17 @@ Consumers need a rebuild / `npm install` to pick this up —
 
 ## what shield is
 
-Prompt-injection defense library for LLM apps. Three-layer model plus
-observability:
+Prompt-injection defense library for LLM apps. Four layers plus
+observability — the first three act on what goes IN to the model, the fourth
+on what comes back OUT and what the model then asks to do:
 
 1. **DETECT** — 30 weighted regex patterns (`detectInjection` /
    `detect_injection`). A tripwire, not a gate: trivially bypassed by
    translation/encoding/rephrasing, so callers decide whether to block.
+   Measured on `bench/corpus.jsonl`: **93.2% precision, 74.5% recall**,
+   identical in both languages and gated in CI. Recall is under 1.0 on
+   purpose — the corpus carries attacks no regex catches. Raise it with a
+   detector, never with a pattern that memorises the corpus.
 2. **WRAP** — `wrapUntrusted` tags external content in `<untrusted_*>` XML
    boundaries. Content is sanitized first so embedded `</untrusted_*>`
    sequences (any case, whitespace, fullwidth `＜`) can't close the
@@ -126,12 +133,26 @@ observability:
    stable within a process (prompt-cache-friendly), not derivable by
    someone who knows the system prompt. Canary in model output ⇒
    `canary_leaked` event.
-4. **ANNOUNCE / STATUS** — client wrappers print a startup banner and emit
+4. **WATCH THE OUTPUT AND THE TOOL CALLS** (v1.6.0+) — `scanOutput` /
+   `scan_output` inspects responses for credential shapes, registered app
+   secrets, PII, exfiltration channels, echoed injections and refusals.
+   `checkToolCall` / `check_tool_call` evaluates what the model asks to run
+   against a `ToolPolicy`: allow/deny lists, side-effecting tools requested
+   after untrusted input (the lethal trifecta), argument rules, per-tool
+   argument schemas, host allow-lists. Streamed tool calls are reassembled
+   from their fragments and evaluated before the caller can act on them.
+   Content shield could not read (base64 PDFs, remote URLs) raises
+   `content_not_scanned` rather than passing silently.
+5. **DETECTORS** (v1.7.0) — a pluggable slot for what regexes cannot do:
+   a classifier, a term list, an LLM judge. Sync detectors run everywhere;
+   async ones run on the output side and in the `*Async` scans. The regex
+   layer's honest rate is in `bench/` and gated in CI.
+6. **ANNOUNCE / STATUS** — client wrappers print a startup banner and emit
    a `shield_started` heartbeat (carrying the version) on construction.
    `npx shield status` aggregates heartbeats per app: version drift vs the
    repo, apps gone quiet, 7-day injection/strip/leak counts. Exits
    non-zero on warnings.
-5. **HEADLESS WATCH** (v1.2.x) — `npx shield headless [--watch] [--notify]`
+7. **HEADLESS WATCH** (v1.2.x) — `npx shield headless [--watch] [--notify]`
    scans running processes for browser automation (headless flags,
    `--remote-debugging-port`, Playwright/Puppeteer/WebDriver/Selenium/
    Cypress/PhantomJS) and logs `headless_detected` events; `--notify`
@@ -153,24 +174,41 @@ All events from every app (TS + Python) land in `~/.shield/events.jsonl`.
 |---|---|
 | `src/shield.ts` | core: patterns, normalization, wrap/sanitize, harden/canary, announce, event bus |
 | `src/coverage.ts` | deny-by-default proxy + `ShieldCoverageError` for the wrappers |
-| `src/output.ts` | output-side detectors (secrets/PII/exfil/echo) + tool-call policy |
-| `src/instance.ts` | `createShield(config)` instance: sinks, redaction, output/tool policy |
-| `src/index.browser.ts` | browser entry (no fs/child_process) — `browser` export condition |
+| `src/output.ts` | output-side detectors (secrets/PII/exfil/echo/refusal), tool-call policy, argument schemas, `ShieldBlockedToolError` |
+| `src/instance.ts` | `createShield(config)` instance: sinks, redaction, output/tool policy, detectors |
+| `src/detectors.ts` | the pluggable `Detector` slot (sync + async, isolated failures) |
+| `src/stream.ts` | stream tap: output text AND tool-call reassembly for raw streams |
+| `src/index.ts` / `src/index.browser.ts` | root entry; browser entry (no fs/child_process) |
+| `src/node.ts`, `src/anthropic.ts`, `src/openai.ts` | subpath entries (`prompt-shield/node` etc.) |
 | `src/client-anthropic.ts` | drop-in Anthropic wrapper (duck-typed, no SDK import) |
 | `src/client-openai.ts` | drop-in OpenAI-compatible wrapper (chat.completions + responses) |
 | `src/logger.ts` | JSONL file logger + `summarizeStatus` (pure, tested) |
 | `src/headless.ts` | automation-process signatures + scanner (`python/shield/headless.py` mirrors) |
-| `src/react.ts` | `ShieldProvider` / `useInjectionScan` hook |
-| `bin/shield-cli.ts` | CLI: `logs`, `status`, `scan`, `clear` |
-| `test/*.test.ts` | node:test suites (106 tests) — `npm test` |
+| `src/react.ts` | `ShieldProvider`, `useShield`, `useInjectionScan` |
+| `bin/shield-cli.ts` | CLI: `logs`, `status`, `scan`, `clear`, `headless` |
+| `bench/corpus.jsonl`, `bench/baseline.json` | 101-sample detection corpus + the committed precision/recall floor |
+| `scripts/make-corpus.mjs` | regenerates the corpus (`npm run bench:corpus`) |
+| `scripts/check-versions.mjs` | fails CI if the two manifests and `core.py` disagree |
+| `scripts/smoke-package.mjs`, `scripts/smoke_package.py` | packaging smoke tests — run against an INSTALLED package, never the repo |
+| `eslint.config.js` | type-aware eslint; ruff + mypy config live in `python/pyproject.toml` |
+| `RELEASING.md` | the publish checklist (nothing is published yet) |
+| `LICENSE` | MIT — added as the conventional default, **confirm before publishing** |
+| `README.md` / `python/README.md` | root is TypeScript-first; the Python one is what PyPI shows |
+| `test/*.test.ts` | node:test suites (146 tests) — `npm test` |
 | `python/shield/` | Python port, same API in snake_case |
-| `python/tests/` | unittest suites (86 tests) — `cd python && python3 -m unittest discover -s tests` |
+| `python/tests/` | unittest suites (126 tests) — `cd python && python3 -m unittest discover -s tests` |
 | `~/Projects/shield-sync.sh` | manual sync → group-chat (see below) |
 
 **Parity rule:** every behavior change lands in BOTH languages and both
 test suites, same commit. A test pins `SHIELD_VERSION` to
 package.json/pyproject on each side, and `npm run check:versions` (in CI)
-fails if the two sides disagree.
+fails if the two sides disagree. Since v1.7.0 the two implementations also
+score the SAME benchmark corpus against the SAME floor, so detection cannot
+drift between them without one side failing.
+
+**What CI enforces** (`.github/workflows/ci.yml`): eslint + `tsc --noEmit` +
+146 tests + the benchmark floor on Node 20 and 22; ruff + mypy + 126 tests +
+the same floor on Python 3.10 and 3.12; and the cross-language version check.
 
 ---
 
@@ -178,10 +216,17 @@ fails if the two sides disagree.
 
 | app | link | update path |
 |---|---|---|
-| bulwork | `file:../shield` | `npm install` + `npm run build` (done for 1.1.0) |
-| voicelogger-cli (`ledger_root/`) | `file:../../shield` | `npm install` (runs via tsx, no build) (done) |
-| group-chat | vendored `packages/shield/` | `~/Projects/shield-sync.sh` (done; see pending) |
+| bulwork | `file:../shield` | `npm install` + `npm run build` |
+| voicelogger-cli (`ledger_root/`) | `file:../../shield` | `npm install` (runs via tsx, no build) |
+| group-chat | vendored `packages/shield/` | `~/Projects/shield-sync.sh` |
 | wearabLLM v1 (`bridge.py`) | `sys.path` insert → `../../../shield/python` | imports live source — updates instantly |
+
+Every one of these is a path or vendored install, which is exactly what
+publishing fixes. **Once `prompt-shield` is on the registries, move them to
+`npm install prompt-shield` / `pip install prompt-shield`** and the
+`file:` links go away. Note the npm package name changed from
+`@local/shield` to `prompt-shield` in v1.9.0, so those installs are a rename
+for the consumer, not just a version bump.
 
 There is **no auto-update by design** — drift is *detected* instead:
 heartbeats carry each app's running version and `shield status` flags
@@ -212,52 +257,57 @@ exactly like no protection.* Hence banners + heartbeats + central status.
 
 ## pending / immediate next steps
 
-1. **Consumers need a rebuild for v1.8.0** — bulwork / voicelogger-cli
+1. **Publish** (see `RELEASING.md`). Everything is prepared and rehearsed;
+   what needs you is confirming the licence and running the two upload
+   commands with your credentials. Unscoped npm names are first-come, and
+   both names were unclaimed as of 2026-09-11.
+2. **Then update the consumers to v1.9.0** — bulwork / voicelogger-cli
    (`npm install` + build), group-chat (`shield-sync.sh`), wearabLLM (live
-   import, nothing to do). `shield status` flags anything still on an older version.
-   Once rebuilt, pass a `createShield({...})` instance with each app's
-   `secrets`, `output.allowedHosts` and `toolPolicy` — the defaults scan
-   but gate nothing (no policy ⇒ every tool call allowed, no allow-list ⇒
-   plain links aren't findings). Streaming callers should also catch
-   `ShieldBlockedToolError` if they turn on `enforceToolPolicy` — that is
-   the one behaviour change in v1.8.0 that a caller can notice.
-2. **Run bulwork and voicelogger once** after rebuilding — heartbeats fire
+   import, nothing to do). `shield status` flags anything on an older
+   version. Three things a consumer must know:
+   - The npm package is now **`prompt-shield`**, not `@local/shield`. The
+     Python import is unchanged (`from shield import ...`).
+   - Pass a `createShield({...})` instance with each app's `secrets`,
+     `output.allowedHosts` and `toolPolicy`. The defaults scan but gate
+     nothing: no policy means every tool call is allowed, and no
+     allow-list means plain links are not findings.
+   - Streaming callers that turn on `enforceToolPolicy` should catch
+     `ShieldBlockedToolError`. That is the one behaviour change since
+     v1.7.0 a caller can actually notice.
+3. **Run bulwork and voicelogger once** after rebuilding — heartbeats fire
    at app startup, so `shield status` shows "never announced" until then.
-3. Optional: add `npx shield status` to shell profile for a login-time
+4. Optional: add `npx shield status` to shell profile for a login-time
    nudge (read-only — safe to automate, unlike the old cron).
 
 ---
 
-## shipped in v1.7.0
+## shipped in v1.9.0
 
-- **Semantic detector slot** — `Detector` in `src/detectors.ts` /
-  `python/shield/detectors.py`, passed as `createShield({ detectors: [...] })`.
-  Sync detectors run everywhere including inside the SDK wrappers; async ones
-  (an LLM judge) run in `scanInputAsync` / `scanOutputAsync` and are fired off
-  by `scanOutput`. Async detectors are deliberately *skipped* by the
-  synchronous input scan, with a one-time warning: that scan gates tool calls
-  and a verdict arriving afterwards would be unsound. A detector that throws
-  is isolated, never propagated.
-- **Refusal telemetry** — a `refusal` output category. A refusal that follows
-  a flagged input scores 0.7 (`refusal:<kind>:after-flagged-input`, a probing
-  signal); an unprompted one scores 0.35, below the flag threshold.
-- **Detection benchmark** — `bench/corpus.jsonl` (101 hand-written samples:
-  55 attacks over 9 families, 46 benign of which 20 are attack-shaped) scored
-  by `test/benchmark.test.ts` and `python/tests/test_benchmark.py` against the
-  floors in `bench/baseline.json`. Both languages read the same corpus, so
-  they cannot drift apart without one failing. Current measurement:
-  **precision 93.2%, recall 74.5%, F1 82.8%**, identical in TS and Python.
-  `npm run bench` prints the report; `SHIELD_CORPUS=/path` measures against
-  your own corpus; `npm run bench:corpus` regenerates the file.
-
-  The floors are floors, not targets. Recall is deliberately well under 1.0:
-  the corpus includes translated, base64-encoded and purely paraphrased
-  attacks no regex catches, and deleting them to inflate the number is
-  blocked by a corpus-shape test. The way to raise recall is a detector, not
-  a pattern that memorises the corpus. Widening three patterns during this
-  work (stacked qualifiers in `ignore`/`disregard`, a looser noun phrase in
-  `exfil-send-to`) took recall from 65.5% to 74.5% with no new false
-  positives.
+- **Renamed to `prompt-shield`** on both registries. The Python *import*
+  stays `shield`: only the distribution name changed, so no consumer's
+  `from shield import ...` line moves, and a dashed name is not a legal
+  Python identifier anyway. The npm name IS a rename for consumers.
+- **Split entry points** — `/node`, `/anthropic`, `/openai` added to the
+  existing `/react`, `/browser`, `/shield`. The root still carries
+  everything; the subpaths let an app pull in only what it uses and keep a
+  bundler from following `fs` into a browser build.
+- **Packaging smoke tests** — `scripts/smoke-package.mjs` (14 checks) and
+  `scripts/smoke_package.py` (12 checks). Both run against an INSTALLED
+  package from outside the repo, which is the only way they mean anything:
+  in the source tree relative paths resolve even when `exports` is wrong,
+  and Python finds the source on `sys.path` even when a module is missing
+  from the wheel. The npm one also asserts `/anthropic` does not re-export
+  the OpenAI wrapper — a subpath that is secretly an alias for the root is
+  not a narrowing, and nothing else would catch that.
+- **`LICENSE` (MIT), registry metadata, `python/README.md`, `RELEASING.md`.**
+  The Python readme was needed regardless: hatchling refuses to build
+  without one inside the package root, and PyPI should not show a
+  TypeScript-first page.
+- The lockfile was regenerated. It had still been advertising
+  `@local/shield` at 1.7.0 after the rename; `npm ci` tolerated it, but a
+  lockfile naming a different package than its manifest is wrong on its own
+  terms, and the packaging smoke tests could not have caught it (a packed
+  tarball does not contain the lockfile).
 
 ---
 
@@ -295,16 +345,55 @@ exactly like no protection.* Hence banners + heartbeats + central status.
 
 ---
 
+## shipped in v1.7.0
+
+- **Semantic detector slot** — `Detector` in `src/detectors.ts` /
+  `python/shield/detectors.py`, passed as `createShield({ detectors: [...] })`.
+  Sync detectors run everywhere including inside the SDK wrappers; async ones
+  (an LLM judge) run in `scanInputAsync` / `scanOutputAsync` and are fired off
+  by `scanOutput`. Async detectors are deliberately *skipped* by the
+  synchronous input scan, with a one-time warning: that scan gates tool calls
+  and a verdict arriving afterwards would be unsound. A detector that throws
+  is isolated, never propagated.
+- **Refusal telemetry** — a `refusal` output category. A refusal that follows
+  a flagged input scores 0.7 (`refusal:<kind>:after-flagged-input`, a probing
+  signal); an unprompted one scores 0.35, below the flag threshold.
+- **Detection benchmark** — `bench/corpus.jsonl` (101 hand-written samples:
+  55 attacks over 9 families, 46 benign of which 20 are attack-shaped) scored
+  by `test/benchmark.test.ts` and `python/tests/test_benchmark.py` against the
+  floors in `bench/baseline.json`. Both languages read the same corpus, so
+  they cannot drift apart without one failing. Current measurement:
+  **precision 93.2%, recall 74.5%, F1 82.8%**, identical in TS and Python.
+  `npm run bench` prints the report; `SHIELD_CORPUS=/path` measures against
+  your own corpus; `npm run bench:corpus` regenerates the file.
+
+  The floors are floors, not targets. Recall is deliberately well under 1.0:
+  the corpus includes translated, base64-encoded and purely paraphrased
+  attacks no regex catches, and deleting them to inflate the number is
+  blocked by a corpus-shape test. The way to raise recall is a detector, not
+  a pattern that memorises the corpus. Widening three patterns during this
+  work (stacked qualifiers in `ignore`/`disregard`, a looser noun phrase in
+  `exfil-send-to`) took recall from 65.5% to 74.5% with no new false
+  positives.
+
+---
+
 ## outstanding
 
-- **Publish** — everything is prepared and rehearsed; `RELEASING.md` is the
-  checklist. Two things need you: run `npm publish` / `twine upload` with
-  your credentials, and confirm the licence (MIT was added as the
-  conventional default, but it was not your explicit choice — see the top of
-  RELEASING.md). Both names were unclaimed as of 2026-09-11, and unscoped
-  npm names are first-come.
+Nothing here is blocked on code. The first two are duplicated in "pending"
+above because they are the active thread; the rest have sat here across
+several releases because they need a decision, a live service, or an
+afternoon of writing rather than a patch.
+
+- **Publish** — prepared and rehearsed; `RELEASING.md` is the checklist.
+  Two things need you: confirm the licence (MIT was added as the
+  conventional default, not your explicit choice — see the top of
+  RELEASING.md), and run `npm publish` / `twine upload` with your
+  credentials. Both names were unclaimed as of 2026-09-11, and unscoped npm
+  names are first-come.
 - **Update consumers after publishing** — bulwork, voicelogger-cli and
-  group-chat move from `file:` / path installs to the published versions.
+  group-chat move from `file:` / vendored installs to the published
+  packages, under the new npm name.
 - **Toolkit docs** (`docs/` playbook): threat model; the "lethal trifecta"
   rule (untrusted input + private data + exfiltration channel); MCP/plugin
   hygiene — the carta-cap-table plugin injecting `<EXTREMELY_IMPORTANT>`
