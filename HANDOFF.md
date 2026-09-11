@@ -1,6 +1,24 @@
 # shield handoff
 
-**State as of 2026-09-10:** v1.5.0. See `docs/REVIEW-2026-09.md` for the
+**State as of 2026-09-11:** v1.6.0. The review's two open items shipped:
+
+**v1.6.0 (output pipeline + instance API):** `scanOutput` / `scan_output`
+inspects model output for credential shapes, registered app secrets, PII,
+exfiltration channels (image beacons, opaque-query URLs to unlisted hosts,
+mailto) and *echo* of input-flagged patterns → `output_flagged` events with
+masked excerpts. `evaluateToolCall` / `evaluate_tool_call` applies a
+`ToolPolicy` (allow/deny, side-effect tools after untrusted input, argument
+rules, host allow-list) → `tool_call_gated`; wrappers check `tool_use` /
+`tool_calls` / `function_call` on every response and strip BLOCKED calls
+when `enforceToolPolicy` is on. `createShield(config)` / `create_shield`
+gives an instance with its own app label, thresholds, secrets, output and
+tool policy, sinks, redaction (`excerpt|hash|none`) and recent buffer;
+events forward to the module bus (and the JSONL log) by default. Wrappers
+take `shield:` to share one. Events carry `direction`. `shield status`
+counts output flags and gated tool calls. Files: `src/output.ts`,
+`src/instance.ts`, `python/shield/output.py`, `python/shield/instance.py`.
+
+**Previously (v1.5.0):** See `docs/REVIEW-2026-09.md` for the
 review that drove this release and for what's still open (the output-side
 pipeline and the `createShield(config)` instance API from §2/§4 of that doc).
 
@@ -116,6 +134,8 @@ All events from every app (TS + Python) land in `~/.shield/events.jsonl`.
 |---|---|
 | `src/shield.ts` | core: patterns, normalization, wrap/sanitize, harden/canary, announce, event bus |
 | `src/coverage.ts` | deny-by-default proxy + `ShieldCoverageError` for the wrappers |
+| `src/output.ts` | output-side detectors (secrets/PII/exfil/echo) + tool-call policy |
+| `src/instance.ts` | `createShield(config)` instance: sinks, redaction, output/tool policy |
 | `src/index.browser.ts` | browser entry (no fs/child_process) — `browser` export condition |
 | `src/client-anthropic.ts` | drop-in Anthropic wrapper (duck-typed, no SDK import) |
 | `src/client-openai.ts` | drop-in OpenAI-compatible wrapper (chat.completions + responses) |
@@ -123,9 +143,9 @@ All events from every app (TS + Python) land in `~/.shield/events.jsonl`.
 | `src/headless.ts` | automation-process signatures + scanner (`python/shield/headless.py` mirrors) |
 | `src/react.ts` | `ShieldProvider` / `useInjectionScan` hook |
 | `bin/shield-cli.ts` | CLI: `logs`, `status`, `scan`, `clear` |
-| `test/*.test.ts` | node:test suites (90 tests) — `npm test` |
+| `test/*.test.ts` | node:test suites (106 tests) — `npm test` |
 | `python/shield/` | Python port, same API in snake_case |
-| `python/tests/` | unittest suites (72 tests) — `cd python && python3 -m unittest discover -s tests` |
+| `python/tests/` | unittest suites (86 tests) — `cd python && python3 -m unittest discover -s tests` |
 | `~/Projects/shield-sync.sh` | manual sync → group-chat (see below) |
 
 **Parity rule:** every behavior change lands in BOTH languages and both
@@ -185,10 +205,9 @@ exactly like no protection.* Hence banners + heartbeats + central status.
 
 ## roadmap (discussed, not started)
 
-- **Tool-call/output-side policy** — the biggest gap. Shield only guards
-  input + canary today; nothing constrains what a model *does* after
-  reading untrusted content (tool calls, exfiltration). This is where real
-  damage happens in agentic apps.
+- ~~Tool-call/output-side policy~~ — shipped in v1.6.0 (`scanOutput`,
+  `ToolPolicy`). Next: a semantic (LLM-judge) detector slot behind the same
+  interface, and per-tool argument schemas.
 - **Toolkit docs** (`docs/` playbook): threat model; the "lethal trifecta"
   rule (untrusted input + private data + exfiltration channel); MCP/plugin
   hygiene — the carta-cap-table plugin injecting `<EXTREMELY_IMPORTANT>`

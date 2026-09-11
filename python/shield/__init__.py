@@ -28,6 +28,20 @@ from .headless import (
 )
 from .logger import emit_event, on_event, off_event, read_events
 from .wrappers import ShieldAnthropicClient, ShieldOpenAIClient, ShieldCoverageError, shield_anthropic, shield_openai
+from .output import (
+    OutputScan,
+    OutputFinding,
+    ToolCall,
+    ToolPolicy,
+    ToolArgumentRule,
+    ToolDecision,
+    scan_output,
+    output_detail,
+    evaluate_tool_call,
+    SECRET_PATTERNS,
+    PII_PATTERNS,
+)
+from .instance import Shield, create_shield, get_default_shield
 
 __version__ = SHIELD_VERSION
 
@@ -60,4 +74,18 @@ __all__ = [
     "ShieldCoverageError",
     "shield_anthropic",
     "shield_openai",
+    "OutputScan",
+    "OutputFinding",
+    "ToolCall",
+    "ToolPolicy",
+    "ToolArgumentRule",
+    "ToolDecision",
+    "scan_output",
+    "output_detail",
+    "evaluate_tool_call",
+    "SECRET_PATTERNS",
+    "PII_PATTERNS",
+    "Shield",
+    "create_shield",
+    "get_default_shield",
 ]

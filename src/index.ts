@@ -24,6 +24,7 @@ export {
   type InjectionExcerpt,
   type HardenResult,
   type ShieldEvent,
+  type ShieldEventType,
   type MessageGateResult,
   type SubscribeOptions,
 } from "./shield.js";
@@ -55,6 +56,36 @@ export {
   type OpenAIResponsesLike,
 } from "./client-openai.js";
 export { ShieldCoverageError } from "./coverage.js";
+
+// Output-side pipeline + tool-call policy
+export {
+  scanOutput,
+  outputDetail,
+  evaluateToolCall,
+  SECRET_PATTERNS,
+  PII_PATTERNS,
+  type OutputScan,
+  type OutputFinding,
+  type OutputCategory,
+  type OutputScanContext,
+  type ToolCall,
+  type ToolCallContext,
+  type ToolPolicy,
+  type ToolArgumentRule,
+  type ToolDecision,
+  type ToolDecisionKind,
+} from "./output.js";
+
+// Instance API
+export {
+  createShield,
+  getDefaultShield,
+  Shield,
+  type ShieldConfig,
+  type OutputConfig,
+  type ScanInputOptions,
+  type Sink,
+} from "./instance.js";
 
 // File logger (Node.js only — no-ops in browser)
 export {

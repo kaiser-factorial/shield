@@ -18,7 +18,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
-EventType = Literal["injection_detected", "canary_leaked", "trigger_stripped", "shield_started", "headless_detected"]
+EventType = Literal[
+    "injection_detected",   # input: an injection pattern matched
+    "canary_leaked",        # output: the system-prompt canary appeared
+    "output_flagged",       # output: secrets / PII / exfil channel / echoed injection
+    "tool_call_gated",      # tool: a requested tool call was flagged or blocked by policy
+    "trigger_stripped",     # wrap: a tag-breakout attempt was neutralized
+    "shield_started",       # heartbeat
+    "headless_detected",    # host: browser automation process seen
+]
 
 _env_dir = os.environ.get("SHIELD_LOG_DIR")
 LOG_DIR = Path(_env_dir) if _env_dir else Path.home() / ".shield"
@@ -93,6 +101,7 @@ def emit_event(
     detail: str = "",
     score: Optional[float] = None,
     patterns: Optional[list[str]] = None,
+    direction: Optional[str] = None,
 ) -> None:
     event: dict = {
         "type": type,
@@ -104,6 +113,8 @@ def emit_event(
         event["score"] = round(score, 4)
     if patterns is not None:
         event["patterns"] = patterns
+    if direction:
+        event["direction"] = direction
 
     _recent.append(event)
     # Iterate a copy and isolate each handler: a subscriber bug must never

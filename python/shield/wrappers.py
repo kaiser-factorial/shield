@@ -19,15 +19,14 @@ import inspect
 from typing import Any, AsyncIterator, Callable, Iterator, Optional, Sequence
 
 from .core import (
-    announce_shield,
     generate_canary,
     harden_system_prompt,
-    output_leaked_canary,
     security_boilerplate,
     wrap_untrusted,
 )
-from .detect import detect_injection, scan_detail
-from .logger import emit_event
+from .detect import InjectionScan
+from .instance import Shield, create_shield
+from .output import ToolCall
 
 
 class ShieldCoverageError(AttributeError):
@@ -380,6 +379,7 @@ class _CanaryCheckedStreamManager:
         self._extract = extract
         self._tap: Optional[_StreamTap] = None
         self._raw: Any = None
+        self._on_final: Optional[Callable[[Any], Any]] = None
 
     def _wrap(self, stream: Any) -> Any:
         self._raw = stream
@@ -393,8 +393,12 @@ class _CanaryCheckedStreamManager:
             text = snap if len(snap) > len(tapped) else tapped
             if text:
                 self._on_text(text)
+            if self._on_final is not None:
+                snap = getattr(self._raw, "current_message_snapshot", None) or getattr(self._raw, "current_completion_snapshot", None)
+                if snap is not None:
+                    self._on_final(snap)
         except Exception:
-            pass  # canary observation must never break streaming
+            pass  # observation must never break streaming
 
     def __enter__(self) -> Any:
         return self._wrap(self._mgr.__enter__())
@@ -425,25 +429,123 @@ def _maybe_await(response: Any, then: Callable[[Any], Any]) -> Any:
 
 # ── shared shield core ───────────────────────────────────────────────────────
 
+class _Prepared:
+    __slots__ = ("kwargs", "canary", "input_scans", "untrusted_input_seen")
+
+    def __init__(self, kwargs: dict, canary: str, input_scans: list, untrusted: bool):
+        self.kwargs = kwargs
+        self.canary = canary
+        self.input_scans = input_scans
+        self.untrusted_input_seen = untrusted
+
+
 class _ShieldCore:
-    def __init__(self, app_label: str, wrap: bool, wrap_tools: bool, canary: Optional[str]):
-        self._label = app_label
+    def __init__(self, shield: Shield, wrap: bool, wrap_tools: bool, canary: Optional[str], enforce: bool):
+        self._shield = shield
+        self._label = shield.app
         self._wrap = wrap
         self._wrap_tools = wrap_tools
-        self._fixed_canary = canary
+        self._fixed_canary = canary if canary is not None else shield.canary
+        self._enforce = enforce
 
-    def _scan(self, text: str, source: str) -> None:
-        if not text:
-            return
-        scan = detect_injection(text)
-        if scan.flagged:
-            emit_event("injection_detected", source=source, detail=scan_detail(text, scan),
-                       score=scan.score, patterns=scan.matches)
+    def _observe_output(self, text: str, p: _Prepared) -> None:
+        if text:
+            self._shield.scan_output(text, canary=p.canary, input_scans=p.input_scans)
 
-    def _check_canary_text(self, text: str, canary: str) -> None:
-        if text and output_leaked_canary(text, canary):
-            emit_event("canary_leaked", source=self._label, detail=text[:200])
-            print(f"[shield] WARNING: canary leaked in response from {self._label}")
+    def _observe_tool_calls(self, response: Any, calls: list[ToolCall], p: _Prepared, strip: Any = None) -> Any:
+        if not calls:
+            return response
+        blocked: set = set()
+        for call in calls:
+            d = self._shield.check_tool_call(call, untrusted_input_seen=p.untrusted_input_seen, input_scans=p.input_scans)
+            if d.decision == "block":
+                blocked.add(call.id)
+        if not strip or not self._enforce or not blocked:
+            return response
+        return strip(response, blocked)
+
+
+def _parse_args(raw: Any) -> Any:
+    if not isinstance(raw, str):
+        return raw
+    try:
+        import json
+        return json.loads(raw)
+    except ValueError:
+        return raw
+
+
+def _anthropic_tool_calls(response: Any) -> list[ToolCall]:
+    content = _get(response, "content") or []
+    if not isinstance(content, list):
+        return []
+    return [ToolCall(name=_get(b, "name"), input=_get(b, "input"), id=_get(b, "id"))
+            for b in content if _get(b, "type") == "tool_use"]
+
+
+def _strip_anthropic_tool_calls(response: Any, blocked: set) -> Any:
+    content = [b for b in (_get(response, "content") or [])
+               if not (_get(b, "type") == "tool_use" and _get(b, "id") in blocked)]
+    if isinstance(response, dict):
+        return {**response, "content": content}
+    try:
+        return response.model_copy(update={"content": content})  # pydantic models (SDK responses)
+    except Exception:  # noqa: BLE001
+        try:
+            setattr(response, "content", content)
+        except Exception:  # noqa: BLE001
+            pass
+        return response
+
+
+def _openai_chat_tool_calls(response: Any) -> list[ToolCall]:
+    out: list[ToolCall] = []
+    for c in _get(response, "choices") or []:
+        msg = _get(c, "message")
+        for tc in (_get(msg, "tool_calls") or []) if msg else []:
+            fn = _get(tc, "function")
+            if fn:
+                out.append(ToolCall(name=_get(fn, "name"), input=_parse_args(_get(fn, "arguments")), id=_get(tc, "id")))
+    return out
+
+
+def _strip_openai_chat_tool_calls(response: Any, blocked: set) -> Any:
+    for c in _get(response, "choices") or []:
+        msg = _get(c, "message")
+        tcs = _get(msg, "tool_calls") if msg else None
+        if tcs:
+            kept = [tc for tc in tcs if _get(tc, "id") not in blocked]
+            if isinstance(msg, dict):
+                msg["tool_calls"] = kept
+            else:
+                try:
+                    setattr(msg, "tool_calls", kept)
+                except Exception:  # noqa: BLE001
+                    pass
+    return response
+
+
+def _responses_tool_calls(response: Any) -> list[ToolCall]:
+    return [ToolCall(name=_get(it, "name"),
+                     input=_parse_args(_get(it, "arguments") if _get(it, "arguments") is not None else _get(it, "input")),
+                     id=_get(it, "call_id") or _get(it, "id"))
+            for it in (_get(response, "output") or [])
+            if _get(it, "type") in ("function_call", "custom_tool_call")]
+
+
+def _strip_responses_tool_calls(response: Any, blocked: set) -> Any:
+    kept = [it for it in (_get(response, "output") or [])
+            if not (_get(it, "type") in ("function_call", "custom_tool_call") and (_get(it, "call_id") or _get(it, "id")) in blocked)]
+    if isinstance(response, dict):
+        return {**response, "output": kept}
+    try:
+        return response.model_copy(update={"output": kept})
+    except Exception:  # noqa: BLE001
+        try:
+            setattr(response, "output", kept)
+        except Exception:  # noqa: BLE001
+            pass
+        return response
 
 
 # ── Anthropic ────────────────────────────────────────────────────────────────
@@ -454,24 +556,31 @@ _ANTHROPIC_MESSAGES_ALLOW = ("count_tokens",)
 
 
 class _AnthropicMessages(_ShieldCore):
-    def __init__(self, inner_messages: Any, app_label: str, wrap: bool, wrap_tools: bool, canary: Optional[str]):
-        super().__init__(app_label, wrap, wrap_tools, canary)
+    def __init__(self, inner_messages: Any, shield: Shield, wrap: bool, wrap_tools: bool, canary: Optional[str], enforce: bool):
+        super().__init__(shield, wrap, wrap_tools, canary, enforce)
         self._m = inner_messages
 
-    def _prepare(self, kwargs: dict) -> tuple[dict, str]:
+    def _prepare(self, kwargs: dict) -> _Prepared:
         hardened, canary = _harden_system(kwargs.get("system"), self._fixed_canary)
         kwargs = {**kwargs, "system": hardened}
+        input_scans: list[InjectionScan] = []
+        untrusted = False
+
+        def scan(text: str, channel: Optional[str] = None) -> None:
+            if text:
+                input_scans.append(self._shield.scan_input(text, channel=channel))
 
         new_messages = []
         for m in kwargs.get("messages", []) or []:
             if isinstance(m, dict) and m.get("role") == "user":
                 content = m.get("content", "")
-                self._scan(_extract_text(content), self._label)
-                # Tool results and documents carry external content (fetched
-                # pages, files, search output) — scan always, with a source
-                # qualifier so `shield logs` shows where the injection came in.
-                self._scan(_extract_tool_result_text(content), f"{self._label}:tool_result")
-                self._scan(_extract_document_text(content), f"{self._label}:document")
+                scan(_extract_text(content))
+                tool_text = _extract_tool_result_text(content)
+                doc_text = _extract_document_text(content)
+                if tool_text or doc_text:
+                    untrusted = True
+                scan(tool_text, "tool_result")
+                scan(doc_text, "document")
 
                 new_content = content
                 if self._wrap_tools:
@@ -482,38 +591,40 @@ class _AnthropicMessages(_ShieldCore):
                     m = {**m, "content": new_content}
             new_messages.append(m)
         kwargs["messages"] = new_messages
-        return kwargs, canary
+        return _Prepared(kwargs, canary, input_scans, untrusted)
 
     def create(self, **kwargs: Any) -> Any:
-        prepared, canary = self._prepare(kwargs)
-        response = self._m.create(**prepared)
+        p = self._prepare(kwargs)
+        response = self._m.create(**p.kwargs)
 
         def finish(r: Any) -> Any:
             if kwargs.get("stream"):
-                return _StreamTap(r, _anthropic_delta_text, lambda t: self._check_canary_text(t, canary))
-            self._check_canary_text(_anthropic_response_text(r), canary)
-            return r
+                return _StreamTap(r, _anthropic_delta_text, lambda t: self._observe_output(t, p))
+            self._observe_output(_anthropic_response_text(r), p)
+            return self._observe_tool_calls(r, _anthropic_tool_calls(r), p, _strip_anthropic_tool_calls)
 
         return _maybe_await(response, finish)
 
     def parse(self, **kwargs: Any) -> Any:
-        prepared, canary = self._prepare(kwargs)
-        response = self._m.parse(**prepared)
+        p = self._prepare(kwargs)
+        response = self._m.parse(**p.kwargs)
 
         def finish(r: Any) -> Any:
-            self._check_canary_text(_anthropic_response_text(r), canary)
-            return r
+            self._observe_output(_anthropic_response_text(r), p)
+            return self._observe_tool_calls(r, _anthropic_tool_calls(r), p, _strip_anthropic_tool_calls)
 
         return _maybe_await(response, finish)
 
     def stream(self, **kwargs: Any) -> Any:
-        """Context manager like anthropic's messages.stream, canary-checked on close."""
-        prepared, canary = self._prepare(kwargs)
-        return _CanaryCheckedStreamManager(
-            self._m.stream(**prepared),
-            lambda t: self._check_canary_text(t, canary),
-            _anthropic_delta_text,
-        )
+        """Context manager like anthropic's messages.stream, output-checked on close."""
+        p = self._prepare(kwargs)
+
+        def on_text(t: str) -> None:
+            self._observe_output(t, p)
+
+        mgr = _CanaryCheckedStreamManager(self._m.stream(**p.kwargs), on_text, _anthropic_delta_text)
+        mgr._on_final = lambda msg: self._observe_tool_calls(msg, _anthropic_tool_calls(msg), p, None)
+        return mgr
 
 
 def shield_anthropic(
@@ -525,6 +636,8 @@ def shield_anthropic(
     announce: bool = True,
     canary: Optional[str] = None,
     passthrough: Sequence[str] = (),
+    shield: Optional[Shield] = None,
+    enforce_tool_policy: bool = False,
 ) -> Any:
     """
     Wrap an anthropic.Anthropic / AsyncAnthropic client.
@@ -534,15 +647,16 @@ def shield_anthropic(
     model (`beta`, `completions`, `messages.batches`, `with_options`) raises
     ShieldCoverageError unless listed in `passthrough`.
 
-    `canary` pins the canary token (for identical system prompts across
-    workers); by default one is derived per prompt from a per-process salt or
-    SHIELD_CANARY_SALT.
+    `shield` supplies a create_shield() instance (sinks, output policy, tool
+    policy); otherwise one is created from `app_label` / `canary`.
+    `enforce_tool_policy=True` strips tool calls the policy BLOCKS from
+    non-streaming responses instead of only logging them.
     """
-    announce_shield(app_label, wrap_user_messages=wrap_user_messages, banner=announce)
+    sh = shield or create_shield(app=app_label, canary=canary, banner=announce)
     passthrough = list(passthrough)
 
     def messages(client: Any) -> Any:
-        impl = _AnthropicMessages(client.messages, app_label, wrap_user_messages, wrap_tool_results, canary)
+        impl = _AnthropicMessages(client.messages, sh, wrap_user_messages, wrap_tool_results, canary, enforce_tool_policy)
         return _Guard(
             client.messages,
             "client.messages",
@@ -572,10 +686,13 @@ class ShieldAnthropicClient(_Guard):
         announce: bool = True,
         canary: Optional[str] = None,
         passthrough: Sequence[str] = (),
+        shield: Optional[Shield] = None,
+        enforce_tool_policy: bool = False,
     ):
         g = shield_anthropic(
             inner, app_label=app_label, wrap_user_messages=wrap_user_messages,
             wrap_tool_results=wrap_tool_results, announce=announce, canary=canary, passthrough=passthrough,
+            shield=shield, enforce_tool_policy=enforce_tool_policy,
         )
         for k in ("_g_inner", "_g_path", "_g_intercept", "_g_allow", "_g_pass", "_g_cache"):
             object.__setattr__(self, k, object.__getattribute__(g, k))
@@ -594,73 +711,73 @@ _OPENAI_RESPONSES_ALLOW = ("input_items", "retrieve", "delete", "cancel")
 
 
 class _OpenAICompletions(_ShieldCore):
-    def __init__(self, inner: Any, app_label: str, wrap: bool, wrap_tools: bool, canary: Optional[str]):
-        super().__init__(app_label, wrap, wrap_tools, canary)
+    def __init__(self, inner: Any, shield: Shield, wrap: bool, wrap_tools: bool, canary: Optional[str], enforce: bool):
+        super().__init__(shield, wrap, wrap_tools, canary, enforce)
         self._c = inner
 
-    def _prepare(self, kwargs: dict) -> tuple[dict, str]:
+    def _prepare(self, kwargs: dict) -> _Prepared:
         messages = list(kwargs.get("messages", []) or [])
-        # Harden the FIRST system (or developer) message in place; any later
-        # system messages pass through untouched.
         sys_idx = next(
             (i for i, m in enumerate(messages) if isinstance(m, dict) and m.get("role") in ("system", "developer")),
             None,
         )
         sys_msg = messages[sys_idx] if sys_idx is not None else None
         hardened, canary = _harden_system(sys_msg.get("content") if sys_msg else None, self._fixed_canary)
+        input_scans: list[InjectionScan] = []
+        untrusted = False
 
         new_messages = []
         for i, m in enumerate(messages):
             if i == sys_idx:
                 m = {**m, "content": hardened}
             elif isinstance(m, dict) and m.get("role") == "user":
-                self._scan(_extract_text(m.get("content", "")), self._label)
+                text = _extract_text(m.get("content", ""))
+                if text:
+                    input_scans.append(self._shield.scan_input(text))
                 if self._wrap:
                     m = {**m, "content": _wrap_user_content(m.get("content", ""))}
             elif isinstance(m, dict) and m.get("role") == "tool":
                 content = m.get("content", "")
-                self._scan(_parts_text(content), f"{self._label}:tool_result")
+                text = _parts_text(content)
+                if text:
+                    untrusted = True
+                    input_scans.append(self._shield.scan_input(text, channel="tool_result"))
                 if self._wrap_tools:
                     m = {**m, "content": _wrap_content_text(content, "tool_result")}
             new_messages.append(m)
 
-        # No system/developer message: the hardened prompt would otherwise
-        # never reach the model — prepend it.
         if sys_idx is None:
             new_messages.insert(0, {"role": "system", "content": hardened})
 
-        return {**kwargs, "messages": new_messages}, canary
+        return _Prepared({**kwargs, "messages": new_messages}, canary, input_scans, untrusted)
 
     def create(self, **kwargs: Any) -> Any:
-        prepared, canary = self._prepare(kwargs)
-        response = self._c.create(**prepared)
+        p = self._prepare(kwargs)
+        response = self._c.create(**p.kwargs)
 
         def finish(r: Any) -> Any:
             if kwargs.get("stream"):
-                return _StreamTap(r, _openai_chunk_text, lambda t: self._check_canary_text(t, canary))
-            self._check_canary_text(_openai_completion_text(r), canary)
-            return r
+                return _StreamTap(r, _openai_chunk_text, lambda t: self._observe_output(t, p))
+            self._observe_output(_openai_completion_text(r), p)
+            return self._observe_tool_calls(r, _openai_chat_tool_calls(r), p, _strip_openai_chat_tool_calls)
 
         return _maybe_await(response, finish)
 
     def parse(self, **kwargs: Any) -> Any:
-        prepared, canary = self._prepare(kwargs)
-        response = self._c.parse(**prepared)
+        p = self._prepare(kwargs)
+        response = self._c.parse(**p.kwargs)
 
         def finish(r: Any) -> Any:
-            self._check_canary_text(_openai_completion_text(r), canary)
-            return r
+            self._observe_output(_openai_completion_text(r), p)
+            return self._observe_tool_calls(r, _openai_chat_tool_calls(r), p, _strip_openai_chat_tool_calls)
 
         return _maybe_await(response, finish)
 
     def stream(self, **kwargs: Any) -> Any:
-        """Context manager like openai's chat.completions.stream, canary-checked on close."""
-        prepared, canary = self._prepare(kwargs)
-        return _CanaryCheckedStreamManager(
-            self._c.stream(**prepared),
-            lambda t: self._check_canary_text(t, canary),
-            _openai_chat_helper_text,
-        )
+        p = self._prepare(kwargs)
+        mgr = _CanaryCheckedStreamManager(self._c.stream(**p.kwargs), lambda t: self._observe_output(t, p), _openai_chat_helper_text)
+        mgr._on_final = lambda c: self._observe_tool_calls(c, _openai_chat_tool_calls(c), p, None)
+        return mgr
 
 
 class _OpenAIResponses(_ShieldCore):
@@ -672,17 +789,19 @@ class _OpenAIResponses(_ShieldCore):
 
     _TEXT_TYPES = ("input_text", "text")
 
-    def __init__(self, inner: Any, app_label: str, wrap: bool, wrap_tools: bool, canary: Optional[str]):
-        super().__init__(app_label, wrap, wrap_tools, canary)
+    def __init__(self, inner: Any, shield: Shield, wrap: bool, wrap_tools: bool, canary: Optional[str], enforce: bool):
+        super().__init__(shield, wrap, wrap_tools, canary, enforce)
         self._r = inner
 
-    def _prepare(self, kwargs: dict) -> tuple[dict, str]:
+    def _prepare(self, kwargs: dict) -> _Prepared:
         instr = kwargs.get("instructions")
         instructions, canary = harden_system_prompt(instr if isinstance(instr, str) else "", self._fixed_canary)
+        input_scans: list[InjectionScan] = []
+        untrusted = False
 
         inp = kwargs.get("input")
         if isinstance(inp, str):
-            self._scan(inp, self._label)
+            input_scans.append(self._shield.scan_input(inp))
             if self._wrap:
                 inp = wrap_untrusted(inp, "user_message")
         elif isinstance(inp, list):
@@ -692,47 +811,48 @@ class _OpenAIResponses(_ShieldCore):
                     t = item.get("type")
                     if t in ("function_call_output", "custom_tool_call_output"):
                         out = item.get("output")
-                        self._scan(_parts_text(out, self._TEXT_TYPES), f"{self._label}:tool_result")
+                        text = _parts_text(out, self._TEXT_TYPES)
+                        if text:
+                            untrusted = True
+                            input_scans.append(self._shield.scan_input(text, channel="tool_result"))
                         if self._wrap_tools:
                             item = {**item, "output": _wrap_content_text(out, "tool_result", self._TEXT_TYPES)}
                     elif t in (None, "message") and item.get("role") == "user":
-                        self._scan(_parts_text(item.get("content"), self._TEXT_TYPES), self._label)
+                        text = _parts_text(item.get("content"), self._TEXT_TYPES)
+                        if text:
+                            input_scans.append(self._shield.scan_input(text))
                         if self._wrap:
                             item = {**item, "content": _wrap_content_text(item.get("content"), "user_message", self._TEXT_TYPES)}
                 items.append(item)
             inp = items
 
-        return {**kwargs, "instructions": instructions, "input": inp}, canary
+        return _Prepared({**kwargs, "instructions": instructions, "input": inp}, canary, input_scans, untrusted)
 
     def create(self, **kwargs: Any) -> Any:
-        prepared, canary = self._prepare(kwargs)
-        response = self._r.create(**prepared)
+        p = self._prepare(kwargs)
+        response = self._r.create(**p.kwargs)
 
         def finish(r: Any) -> Any:
             if kwargs.get("stream"):
-                return _StreamTap(r, _responses_delta_text, lambda t: self._check_canary_text(t, canary))
-            self._check_canary_text(_responses_output_text(r), canary)
-            return r
+                return _StreamTap(r, _responses_delta_text, lambda t: self._observe_output(t, p))
+            self._observe_output(_responses_output_text(r), p)
+            return self._observe_tool_calls(r, _responses_tool_calls(r), p, _strip_responses_tool_calls)
 
         return _maybe_await(response, finish)
 
     def parse(self, **kwargs: Any) -> Any:
-        prepared, canary = self._prepare(kwargs)
-        response = self._r.parse(**prepared)
+        p = self._prepare(kwargs)
+        response = self._r.parse(**p.kwargs)
 
         def finish(r: Any) -> Any:
-            self._check_canary_text(_responses_output_text(r), canary)
-            return r
+            self._observe_output(_responses_output_text(r), p)
+            return self._observe_tool_calls(r, _responses_tool_calls(r), p, _strip_responses_tool_calls)
 
         return _maybe_await(response, finish)
 
     def stream(self, **kwargs: Any) -> Any:
-        prepared, canary = self._prepare(kwargs)
-        return _CanaryCheckedStreamManager(
-            self._r.stream(**prepared),
-            lambda t: self._check_canary_text(t, canary),
-            _responses_delta_text,
-        )
+        p = self._prepare(kwargs)
+        return _CanaryCheckedStreamManager(self._r.stream(**p.kwargs), lambda t: self._observe_output(t, p), _responses_delta_text)
 
 
 def shield_openai(
@@ -744,6 +864,8 @@ def shield_openai(
     announce: bool = True,
     canary: Optional[str] = None,
     passthrough: Sequence[str] = (),
+    shield: Optional[Shield] = None,
+    enforce_tool_policy: bool = False,
 ) -> Any:
     """
     Wrap an openai.OpenAI / AsyncOpenAI (or OpenAI-compatible) client.
@@ -753,10 +875,13 @@ def shield_openai(
     pass through. Anything else that could carry a prompt to the model
     (`beta`, legacy `completions`, `batches`, `with_options`) raises
     ShieldCoverageError unless listed in `passthrough`.
+
+    `shield` supplies a create_shield() instance; `enforce_tool_policy=True`
+    strips BLOCKED tool calls from non-streaming responses.
     """
-    announce_shield(app_label, wrap_user_messages=wrap_user_messages, banner=announce)
+    sh = shield or create_shield(app=app_label, canary=canary, banner=announce)
     passthrough = list(passthrough)
-    args = (app_label, wrap_user_messages, wrap_tool_results, canary)
+    args = (sh, wrap_user_messages, wrap_tool_results, canary, enforce_tool_policy)
 
     def completions(chat: Any) -> Any:
         impl = _OpenAICompletions(chat.completions, *args)
@@ -804,10 +929,13 @@ class ShieldOpenAIClient(_Guard):
         announce: bool = True,
         canary: Optional[str] = None,
         passthrough: Sequence[str] = (),
+        shield: Optional[Shield] = None,
+        enforce_tool_policy: bool = False,
     ):
         g = shield_openai(
             inner, app_label=app_label, wrap_user_messages=wrap_user_messages,
             wrap_tool_results=wrap_tool_results, announce=announce, canary=canary, passthrough=passthrough,
+            shield=shield, enforce_tool_policy=enforce_tool_policy,
         )
         for k in ("_g_inner", "_g_path", "_g_intercept", "_g_allow", "_g_pass", "_g_cache"):
             object.__setattr__(self, k, object.__getattribute__(g, k))
