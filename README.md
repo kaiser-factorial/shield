@@ -1,4 +1,4 @@
-# @local/shield
+# prompt-shield
 
 Prompt injection defense library. Plugs into TypeScript and Python apps that call LLMs, providing detection, semantic wrapping, canary tokens, and a unified event log across all apps.
 
@@ -23,19 +23,43 @@ Prompt injection defense library. Plugs into TypeScript and Python apps that cal
 ## Install
 
 ```bash
-# TypeScript
-npm install file:../shield   # or github:kaiser-factorial/shield
+npm install prompt-shield
+pip install prompt-shield
+```
 
-# Python (lives in python/ inside this repo)
+The Python **distribution** is `prompt-shield`; the **import** stays `shield`
+(`from shield import create_shield`). Renaming the module would break every
+existing import line for no benefit, and a dashed name is not a legal Python
+identifier anyway.
+
+Not yet on the public registries — see `RELEASING.md`. Until then:
+
+```bash
+npm install github:kaiser-factorial/shield   # or file:../shield
 pip install -e ../shield/python
 ```
+
+### Entry points
+
+The root export carries everything. The subpaths exist so an app pulls in only
+what it uses, and so a bundler never follows `fs` into a browser build.
+
+| import | what it is |
+|---|---|
+| `prompt-shield` | everything: detect, wrap, harden, `createShield`, both SDK wrappers |
+| `prompt-shield/anthropic` | the Anthropic wrapper alone |
+| `prompt-shield/openai` | the OpenAI / OpenRouter wrapper alone |
+| `prompt-shield/node` | file logger and headless-browser watch (server-side only) |
+| `prompt-shield/react` | `ShieldProvider`, `useShield` |
+| `prompt-shield/browser` | the browser build explicitly |
+| `prompt-shield/shield` | the detection core with no instance or wrapper machinery |
 
 ## TypeScript usage
 
 ### Harden a system prompt
 
 ```ts
-import { hardenSystemPrompt, SYSTEM_CANARY } from '@local/shield';
+import { hardenSystemPrompt, SYSTEM_CANARY } from 'prompt-shield';
 
 const { hardenedPrompt, canary } = hardenSystemPrompt(BASE_SYSTEM_PROMPT);
 // Pass hardenedPrompt to your LLM call
@@ -45,7 +69,7 @@ const { hardenedPrompt, canary } = hardenSystemPrompt(BASE_SYSTEM_PROMPT);
 ### Wrap untrusted content
 
 ```ts
-import { wrapUntrusted, detectInjection } from '@local/shield';
+import { wrapUntrusted, detectInjection } from 'prompt-shield';
 
 const scan = detectInjection(userSuppliedText);
 if (scan.flagged) console.warn('Injection attempt:', scan.patterns);
@@ -57,7 +81,7 @@ const safe = wrapUntrusted(userSuppliedText, 'web_page');
 ### Drop-in Anthropic client wrapper
 
 ```ts
-import { shieldAnthropic } from '@local/shield';
+import { shieldAnthropic } from 'prompt-shield';
 import Anthropic from '@anthropic-ai/sdk';
 
 const client = shieldAnthropic(new Anthropic(), { appLabel: 'my-app' });
@@ -79,7 +103,7 @@ const msg = await client.messages.create({ ... });
 ### Drop-in OpenAI/OpenRouter wrapper
 
 ```ts
-import { shieldOpenAI } from '@local/shield';
+import { shieldOpenAI } from 'prompt-shield';
 import OpenAI from 'openai';
 
 const client = shieldOpenAI(new OpenAI(), { appLabel: 'my-app' });
@@ -92,7 +116,7 @@ const response = await client.responses.create({ instructions, input }); // Resp
 For anything beyond one app on one laptop, build an instance and hand it to the wrappers. It owns its config, sinks and event buffer; events still forward to the shared log unless you say otherwise.
 
 ```ts
-import { createShield, shieldAnthropic } from '@local/shield';
+import { createShield, shieldAnthropic } from 'prompt-shield';
 
 const shield = createShield({
   app: 'support-bot',
@@ -129,7 +153,7 @@ honestly. The detector slot is where you add what regexes can't do: a local
 classifier, an embedding-similarity check, your own term list, an LLM judge.
 
 ```ts
-import { createShield, type Detector } from '@local/shield';
+import { createShield, type Detector } from 'prompt-shield';
 
 const termList: Detector = {
   name: 'terms',
@@ -214,7 +238,7 @@ iterator — the streaming equivalent of stripping the block, since earlier
 events are already with you and there is nothing left to strip.
 
 ```ts
-import { ShieldBlockedToolError } from '@local/shield';
+import { ShieldBlockedToolError } from 'prompt-shield';
 
 try {
   for await (const event of stream) { render(event); }
@@ -306,7 +330,7 @@ too (source qualifier `:document`); Python async clients (`AsyncOpenAI`,
 ### File logger (Node.js)
 
 ```ts
-import { initFileLogger, onShieldEvent } from '@local/shield';
+import { initFileLogger, onShieldEvent } from 'prompt-shield';
 
 await initFileLogger(); // wires events → ~/.shield/events.jsonl (wrappers do this for you)
 onShieldEvent((ev) => myLogger.warn(ev), { replay: true }); // or route them anywhere
@@ -315,7 +339,7 @@ onShieldEvent((ev) => myLogger.warn(ev), { replay: true }); // or route them any
 ### React hook
 
 ```tsx
-import { ShieldProvider, useShield } from '@local/shield/react';
+import { ShieldProvider, useShield } from 'prompt-shield/react';
 
 function App() {
   return <ShieldProvider><YourApp /></ShieldProvider>;
@@ -402,7 +426,7 @@ There is no auto-update — that was removed on purpose (see the sync section be
 | Consumer | How it updates |
 |---|---|
 | wearabLLM (sys.path import of `python/`) | Immediately — imports the live source on next run |
-| bulwork, voicelogger-cli (`file:../shield`) | `npm install` (or `npm update @local/shield`) + rebuild |
+| bulwork, voicelogger-cli (`file:../shield`) | `npm install` (or `npm update prompt-shield`) + rebuild |
 | group-chat (vendored copy) | `~/Projects/shield-sync.sh` (test-gated, review-first) |
 
 ## Tests
@@ -445,7 +469,7 @@ Environment variables: `SHIELD_LOG_DIR` (log location), `SHIELD_CANARY_SALT`
 ## Requirements
 
 Node ≥ 20 (`globalThis.crypto`; synchronous log writes need ≥ 20.16) or any
-evergreen browser via the `browser` export condition / `@local/shield/browser`.
+evergreen browser via the `browser` export condition / `prompt-shield/browser`.
 Python ≥ 3.10. Zero runtime dependencies on either side.
 
 ## Apps wired up

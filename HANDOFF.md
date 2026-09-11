@@ -1,8 +1,14 @@
 # shield handoff
 
-**State as of 2026-09-11:** v1.8.0. Every code item from the September review
-has now shipped. What remains needs a decision from you (package names) or is
-not code (docs playbook, connected-surface audit).
+**State as of 2026-09-11:** v1.9.0. Every code item from the September review
+has shipped, and both packages are renamed and release-ready as
+**`prompt-shield`**. Nothing is published yet — `RELEASING.md` has the
+checklist, and the two upload commands need your credentials.
+
+**v1.9.0 (packaging):** renamed to `prompt-shield` on both registries (the
+Python *import* stays `shield`), added `/node`, `/react`, `/anthropic`,
+`/openai` subpath exports, a PyPI-facing `python/README.md`, a `LICENSE`, and
+packaging smoke tests that run against a real install rather than the repo.
 
 **v1.8.0 (enforcement gaps):** raw-stream tool-call evaluation, per-tool
 argument schemas, document wrapping plus a `content_not_scanned` signal, and
@@ -291,11 +297,14 @@ exactly like no protection.* Hence banners + heartbeats + central status.
 
 ## outstanding
 
-- **Split entry points / publish** — `/node`, `/react`, `/anthropic`,
-  `/openai` subpaths and real npm/PyPI names. **Needs your decision on the
-  names**; today everything ships under `@local/shield` and installs via
-  `file:`. This is the only remaining blocker to using shield from an
-  arbitrary app without a path reference.
+- **Publish** — everything is prepared and rehearsed; `RELEASING.md` is the
+  checklist. Two things need you: run `npm publish` / `twine upload` with
+  your credentials, and confirm the licence (MIT was added as the
+  conventional default, but it was not your explicit choice — see the top of
+  RELEASING.md). Both names were unclaimed as of 2026-09-11, and unscoped
+  npm names are first-come.
+- **Update consumers after publishing** — bulwork, voicelogger-cli and
+  group-chat move from `file:` / path installs to the published versions.
 - **Toolkit docs** (`docs/` playbook): threat model; the "lethal trifecta"
   rule (untrusted input + private data + exfiltration channel); MCP/plugin
   hygiene — the carta-cap-table plugin injecting `<EXTREMELY_IMPORTANT>`

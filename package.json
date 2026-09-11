@@ -1,7 +1,7 @@
 {
-  "name": "@local/shield",
-  "version": "1.8.0",
-  "description": "Prompt injection defense utilities — detect, wrap, harden, log",
+  "name": "prompt-shield",
+  "version": "1.9.0",
+  "description": "Prompt injection defense for LLM apps \u2014 detect, wrap, harden, and watch model output and tool calls",
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
@@ -9,7 +9,8 @@
     "dist",
     "src",
     "bin",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "bin": {
     "shield": "./dist/bin/shield-cli.js"
@@ -24,9 +25,21 @@
       "types": "./dist/src/index.browser.d.ts",
       "import": "./dist/src/index.browser.js"
     },
+    "./node": {
+      "types": "./dist/src/node.d.ts",
+      "import": "./dist/src/node.js"
+    },
     "./react": {
       "types": "./dist/src/react.d.ts",
       "import": "./dist/src/react.js"
+    },
+    "./anthropic": {
+      "types": "./dist/src/anthropic.d.ts",
+      "import": "./dist/src/anthropic.js"
+    },
+    "./openai": {
+      "types": "./dist/src/openai.d.ts",
+      "import": "./dist/src/openai.js"
     },
     "./shield": {
       "types": "./dist/src/shield.d.ts",
@@ -75,5 +88,25 @@
   "engines": {
     "node": ">=20"
   },
-  "sideEffects": false
+  "sideEffects": false,
+  "keywords": [
+    "prompt-injection",
+    "llm-security",
+    "ai-security",
+    "anthropic",
+    "openai",
+    "guardrails",
+    "jailbreak-detection",
+    "exfiltration",
+    "tool-policy"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kaiser-factorial/shield.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kaiser-factorial/shield/issues"
+  },
+  "homepage": "https://github.com/kaiser-factorial/shield#readme"
 }
