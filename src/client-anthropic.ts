@@ -6,7 +6,7 @@
  *
  * Usage:
  *   import Anthropic from "@anthropic-ai/sdk";
- *   import { shieldAnthropic } from "@local/shield";
+ *   import { shieldAnthropic } from "prompt-shield";
  *   const client = shieldAnthropic(new Anthropic(), { appLabel: "my-app" });
  *
  *   // Then use exactly as before — the return type is the type you passed in:

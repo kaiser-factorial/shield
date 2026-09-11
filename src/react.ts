@@ -3,11 +3,11 @@
  *
  * Usage:
  *   // In your app root:
- *   import { ShieldProvider } from "@local/shield/react";
+ *   import { ShieldProvider } from "prompt-shield/react";
  *   <ShieldProvider><App /></ShieldProvider>
  *
  *   // Anywhere in your tree:
- *   import { useShield } from "@local/shield/react";
+ *   import { useShield } from "prompt-shield/react";
  *   const { events, scan, wrap } = useShield();
  */
 

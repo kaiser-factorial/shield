@@ -7,7 +7,7 @@
  *
  * Usage:
  *   import OpenAI from "openai";
- *   import { shieldOpenAI } from "@local/shield";
+ *   import { shieldOpenAI } from "prompt-shield";
  *   const openai = shieldOpenAI(new OpenAI({ apiKey }), { appLabel: "my-app" });
  *
  * Covered: `chat.completions.create/parse/stream/runTools` and
