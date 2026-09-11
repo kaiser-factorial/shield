@@ -39,9 +39,13 @@ TAG_BREAKOUT_SRC = (
 
 _PATTERNS: list[tuple[str, re.Pattern[str], float]] = [
     # Override attempts
-    ("ignore-instructions",    re.compile(r"ignore\s+(all\s+)?(previous|prior|above|your)\s+(instructions?|rules?|prompts?|directives?)", re.I), 0.90),
+    # The determiner and qualifier slots are bounded repeats, not `*`: the
+    # benchmark corpus showed "ignore THE ABOVE instructions" and "disregard
+    # YOUR PRIOR rules" slipping past a single-slot pattern, and an unbounded
+    # group here would reintroduce the ReDoS v1.5 removed.
+    ("ignore-instructions",    re.compile(r"ignore\s+(?:all\s+|the\s+|any\s+){0,3}(?:previous|prior|above|earlier|preceding|your|users?'?s?)\s+(?:\w+\s+){0,2}(?:instructions?|rules?|prompts?|directives?|guidance|questions?|requests?)", re.I), 0.90),
     ("forget-instructions",    re.compile(r"forget\s+(everything|all\s+instructions?|your\s+instructions?)", re.I), 0.90),
-    ("disregard-instructions", re.compile(r"disregard\s+(all\s+)?(previous|prior|your)\s+(instructions?|rules?)", re.I), 0.85),
+    ("disregard-instructions", re.compile(r"disregard\s+(?:all\s+|the\s+|any\s+){0,3}(?:previous|prior|above|earlier|preceding|your)\s+(?:\w+\s+){0,2}(?:instructions?|rules?|directives?|guidance)", re.I), 0.85),
     ("new-instructions",       re.compile(r"new\s+(instructions?|directive|rules?|orders?)\s*:", re.I), 0.75),
     ("override-instructions",  re.compile(r"override\s+(your\s+)?(instructions?|rules?|programming)", re.I), 0.85),
     # Role hijacking. "act as" / "roleplay as" / "what are your rules" are
@@ -77,7 +81,7 @@ _PATTERNS: list[tuple[str, re.Pattern[str], float]] = [
     ("hidden-instruction",     re.compile(r"hidden\s+(instruction|command|directive)", re.I), 0.70),
     # Exfiltration setup
     ("markdown-image-exfil",   re.compile(r"!\[[^\]\n]{0,200}\]\((?:https?:)?//[^)\s]{1,300}\?[^)\s]{16,}\)", re.I), 0.80),
-    ("exfil-send-to",          re.compile(r"\b(send|post|email|forward|transmit|upload)\s+(this|it|them|the\s+(above|conversation|data|contents?|response|results?|history|document))\s+to\s+", re.I), 0.60),
+    ("exfil-send-to",          re.compile(r"\b(?:send|post|email|forward|transmit|upload)\s+(?:this|it|them|the\s+(?:\w+\s+){0,2}(?:above|conversation|data|contents?|response|results?|history|document|summary|transcript|details?))\s+to\s+", re.I), 0.60),
     # Boundary breakout — scan raw text BEFORE wrapping; wrapped output
     # contains these tags legitimately.
     ("untrusted-tag-breakout", re.compile(TAG_BREAKOUT_SRC, re.I), 0.85),

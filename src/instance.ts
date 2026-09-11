@@ -44,6 +44,14 @@ import {
   type ToolDecision,
   type ToolPolicy,
 } from "./output.js";
+import {
+  combineScore,
+  runDetectors,
+  runDetectorsAsync,
+  type Detector,
+  type DetectorContext,
+  type DetectorFinding,
+} from "./detectors.js";
 import { initFileLogger } from "./logger.js";
 
 export type Sink = (event: ShieldEvent) => void;
@@ -71,6 +79,11 @@ export interface ShieldConfig {
   secrets?: string[];
   output?: OutputConfig;
   toolPolicy?: ToolPolicy;
+  /** Extra detectors beyond the pattern layer — a classifier, a term list,
+   *  an LLM judge. Sync ones run everywhere; async ones run in the *Async
+   *  scans and are fired off (output side only) by scanOutput. See
+   *  detectors.ts for why the input side stays synchronous. */
+  detectors?: Detector[];
   /** Extra event sinks (console, webhook, OpenTelemetry…). */
   sinks?: Sink[];
   /** Also emit on the module-level bus (default true) so `shield logs` and
@@ -151,25 +164,88 @@ export class Shield {
     }
   }
 
+  private readonly warnedDeferred = new Set<string>();
+
+  private warnDeferred(name: string): void {
+    if (this.warnedDeferred.has(name)) return;
+    this.warnedDeferred.add(name);
+    console.warn(
+      `[shield] detector "${name}" is async and was skipped by the synchronous input scan ` +
+        `(its verdict would arrive after the tool-call decision). Call scanInputAsync() to include it.`,
+    );
+  }
+
   private source(channel?: string): string {
     return channel ? `${this.app}:${channel}` : this.app;
   }
 
   // ── input side ────────────────────────────────────────────────────────────
 
-  /** Scan untrusted text; emits `injection_detected` when flagged. */
+  private detectorCtx(side: "input" | "output", channel?: string, baseline?: InjectionScan | OutputScan): DetectorContext {
+    return { side, app: this.app, channel, baseline };
+  }
+
+  /** Fold detector findings into a pattern-layer scan, keeping the shape callers already consume. */
+  private mergeInput(text: string, scan: InjectionScan, findings: DetectorFinding[], threshold: number): InjectionScan {
+    if (findings.length === 0) return scan;
+    const score = combineScore(scan.score, scan.matches.length, findings);
+    return {
+      ...scan,
+      score,
+      flagged: score >= threshold,
+      matches: [...scan.matches, ...findings.map((f) => f.label)],
+      excerpts: [
+        ...scan.excerpts,
+        ...findings.map((f) => ({ pattern: f.label, excerpt: f.excerpt ?? "", line: 1, index: f.index ?? 0 })),
+      ],
+    };
+  }
+
+  private emitInput(text: string, scan: InjectionScan, channel?: string): void {
+    if (!scan.flagged) return;
+    this.emit({
+      type: "injection_detected",
+      source: this.source(channel),
+      detail: scanDetail(text, scan),
+      score: scan.score,
+      patterns: scan.matches,
+      direction: "input",
+    });
+  }
+
+  /**
+   * Scan untrusted text; emits `injection_detected` when flagged.
+   *
+   * Synchronous, because the result gates tool calls: an async detector
+   * registered on the input side is SKIPPED here (named once in a warning)
+   * rather than silently left out of a decision. Use `scanInputAsync` when
+   * you can wait.
+   */
   scanInput(text: string, opts: ScanInputOptions = {}): InjectionScan {
-    const scan = detectInjection(text, opts.threshold ?? this.config.threshold ?? 0.5);
-    if (scan.flagged) {
-      this.emit({
-        type: "injection_detected",
-        source: this.source(opts.channel),
-        detail: scanDetail(text, scan),
-        score: scan.score,
-        patterns: scan.matches,
-        direction: "input",
-      });
+    const threshold = opts.threshold ?? this.config.threshold ?? 0.5;
+    const base = detectInjection(text, threshold);
+    const detectors = this.config.detectors ?? [];
+    if (detectors.length === 0) {
+      this.emitInput(text, base, opts.channel);
+      return base;
     }
+    const run = runDetectors(detectors, text, this.detectorCtx("input", opts.channel, base));
+    for (const name of run.deferred) this.warnDeferred(name);
+    const scan = this.mergeInput(text, base, run.findings, threshold);
+    this.emitInput(text, scan, opts.channel);
+    return scan;
+  }
+
+  /** Like scanInput, but waits for async detectors too. */
+  async scanInputAsync(text: string, opts: ScanInputOptions = {}): Promise<InjectionScan> {
+    const threshold = opts.threshold ?? this.config.threshold ?? 0.5;
+    const base = detectInjection(text, threshold);
+    const detectors = this.config.detectors ?? [];
+    const findings = detectors.length === 0
+      ? []
+      : await runDetectorsAsync(detectors, text, this.detectorCtx("input", opts.channel, base));
+    const scan = this.mergeInput(text, base, findings, threshold);
+    this.emitInput(text, scan, opts.channel);
     return scan;
   }
 
@@ -190,30 +266,87 @@ export class Shield {
    * for everything else.
    */
   scanOutput(text: string, ctx: OutputScanContext = {}): OutputScan {
-    const merged: OutputScanContext = {
+    const merged = this.outputCtx(ctx);
+    const base = scanOutput(text, merged);
+    const detectors = this.config.detectors ?? [];
+    let scan = base;
+
+    if (detectors.length > 0) {
+      const run = runDetectors(detectors, text, this.detectorCtx("output", undefined, base));
+      scan = this.mergeOutput(base, run.findings, merged.threshold ?? 0.5);
+      // Output scanning never gates anything, so a late verdict is still
+      // worth having: let async detectors finish and emit on their own.
+      if (run.pending) {
+        void run.pending.then((late) => {
+          const withLate = this.mergeOutput(base, late, merged.threshold ?? 0.5);
+          this.emitOutput(text, withLate, merged, { canaryAlreadyEmitted: true, onlyDetectorFindings: true });
+        });
+      }
+    }
+
+    this.emitOutput(text, scan, merged);
+    return scan;
+  }
+
+  /** Like scanOutput, but waits for async detectors and emits once. */
+  async scanOutputAsync(text: string, ctx: OutputScanContext = {}): Promise<OutputScan> {
+    const merged = this.outputCtx(ctx);
+    const base = scanOutput(text, merged);
+    const detectors = this.config.detectors ?? [];
+    const findings = detectors.length === 0
+      ? []
+      : await runDetectorsAsync(detectors, text, this.detectorCtx("output", undefined, base));
+    const scan = this.mergeOutput(base, findings, merged.threshold ?? 0.5);
+    this.emitOutput(text, scan, merged);
+    return scan;
+  }
+
+  private outputCtx(ctx: OutputScanContext): OutputScanContext {
+    return {
       allowedHosts: this.config.output?.allowedHosts,
       detectors: this.config.output?.detectors,
       threshold: this.config.output?.threshold,
       secrets: this.config.secrets,
       ...ctx,
     };
-    const scan = scanOutput(text, merged);
-    if (merged.canary && outputLeakedCanary(text, merged.canary)) {
+  }
+
+  private mergeOutput(scan: OutputScan, findings: DetectorFinding[], threshold: number): OutputScan {
+    if (findings.length === 0) return scan;
+    const extra = findings.map((f) => ({
+      label: f.label,
+      category: "custom" as const,
+      weight: f.weight,
+      excerpt: f.excerpt ?? "",
+      index: f.index ?? -1,
+    }));
+    const all = [...scan.findings, ...extra];
+    const score = combineScore(scan.score, scan.findings.length, findings);
+    return { score, flagged: score >= threshold, findings: all, matches: all.map((f) => f.label) };
+  }
+
+  private emitOutput(
+    text: string,
+    scan: OutputScan,
+    merged: OutputScanContext,
+    opts: { canaryAlreadyEmitted?: boolean; onlyDetectorFindings?: boolean } = {},
+  ): void {
+    if (!opts.canaryAlreadyEmitted && merged.canary && outputLeakedCanary(text, merged.canary)) {
       this.emit({ type: "canary_leaked", source: this.app, detail: text.slice(0, 200), direction: "output" });
       console.warn(`[shield] Canary leak detected in response from ${this.app}`);
     }
-    const rest = scan.findings.filter((f) => f.category !== "canary");
-    if (rest.length > 0 && scan.flagged) {
-      this.emit({
-        type: "output_flagged",
-        source: this.app,
-        detail: outputDetail({ ...scan, findings: rest }),
-        score: scan.score,
-        patterns: rest.map((f) => f.label),
-        direction: "output",
-      });
-    }
-    return scan;
+    let rest = scan.findings.filter((f) => f.category !== "canary");
+    // The late-detector pass re-reports only what the first pass could not.
+    if (opts.onlyDetectorFindings) rest = rest.filter((f) => f.label.startsWith("detector:"));
+    if (rest.length === 0 || !scan.flagged) return;
+    this.emit({
+      type: "output_flagged",
+      source: this.app,
+      detail: outputDetail({ ...scan, findings: rest }),
+      score: scan.score,
+      patterns: rest.map((f) => f.label),
+      direction: "output",
+    });
   }
 
   /** Evaluate a requested tool call against the policy; emits `tool_call_gated` unless allowed. */

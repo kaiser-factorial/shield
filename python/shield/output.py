@@ -102,6 +102,22 @@ PII_PATTERNS: list[tuple[str, re.Pattern[str], float, Optional[Callable[[re.Matc
     ("iban",        re.compile(r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){3,7}[ ]?[A-Z0-9]{1,4}\b"), 0.60, None),
 ]
 
+# ── refusal ──────────────────────────────────────────────────────────────────
+
+# The model declining, or reporting that it was asked to do something it
+# shouldn't. On its own this is ordinary — models refuse all day — so the
+# weight sits below the flag threshold and it only surfaces in combination.
+# The pairing is what matters: a refusal in the same turn that untrusted
+# content was flagged is the shape of a probe the model caught.
+REFUSAL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("declined",        re.compile(r"\bI\s+(?:can(?:'|\u2019)?t|cannot|am\s+unable\s+to|won(?:'|\u2019)?t|will\s+not)\b[^.!?\n]{0,60}?\b(?:help|assist|comply|do\s+that|provide|share|reveal|continue|follow)\b", re.I)),
+    ("apologetic",      re.compile(r"\bI(?:'|\u2019)?m\s+(?:sorry|afraid)\b[^.!?\n]{0,40}?\b(?:can(?:'|\u2019)?t|cannot|unable|not\s+able)\b", re.I)),
+    ("must-decline",    re.compile(r"\bI\s+(?:must|have\s+to|will)\s+(?:decline|refuse)\b", re.I)),
+    ("against-policy",  re.compile(r"\b(?:that|this|it)\s+(?:would\s+)?(?:violate|goes?\s+against|conflicts?\s+with)\b[^.!?\n]{0,40}?\b(?:polic|guideline|instruction|constraint)", re.I)),
+    # The model naming the attack: the content carried instructions and it noticed.
+    ("reported-injection", re.compile(r"\b(?:this|the)\s+(?:message|text|content|page|document|tool\s+result|input)\b[^.!?\n]{0,60}?\b(?:appears\s+to\s+)?(?:contain|include)s?\b[^.!?\n]{0,40}?\b(?:prompt\s+injection|injected\s+instruction|hidden\s+instruction|embedded\s+instruction)", re.I)),
+]
+
 # ── exfiltration ─────────────────────────────────────────────────────────────
 
 _URL_RE = re.compile(r"\b(?:https?:)?//([A-Za-z0-9.-]{1,253})(?::\d{1,5})?(/[^\s)<>\"'\]]{0,2048})?")
@@ -217,6 +233,18 @@ def scan_output(
                 report("unlisted-host", 0.4, m.start(), m.end() - m.start())
         for m in _MAILTO_RE.finditer(scanned):
             report("mailto", 0.4, m.start(), m.end() - m.start())
+
+    if on("refusal"):
+        after_flagged = bool(input_scans) and any(s.flagged for s in input_scans)
+        for label, pat in REFUSAL_PATTERNS:
+            m = pat.search(scanned)
+            if not m:
+                continue
+            findings.append(OutputFinding(
+                f"refusal:{label}:after-flagged-input" if after_flagged else f"refusal:{label}",
+                "refusal", 0.7 if after_flagged else 0.35,
+                _excerpt_at(scanned, m.start(), m.end() - m.start()), m.start()))
+            break  # one refusal finding is enough for triage
 
     if on("echo") and input_scans:
         probe = detect_injection(scanned, 0)

@@ -1,6 +1,14 @@
 # shield handoff
 
-**State as of 2026-09-11:** v1.6.0. The review's two open items shipped:
+**State as of 2026-09-11:** v1.7.0. The review's three detection items
+shipped (detector slot, refusal telemetry, detection benchmark); the
+outstanding list below is what remains.
+
+**v1.7.0 (detectors + benchmark):** a pluggable `Detector` slot behind the
+scans, a `refusal` output category, and a committed precision/recall floor
+measured over `bench/corpus.jsonl` in both languages. Files:
+`src/detectors.ts`, `python/shield/detectors.py`, `bench/`,
+`test/benchmark.test.ts`, `test/detectors.test.ts`.
 
 **v1.6.0 (output pipeline + instance API):** `scanOutput` / `scan_output`
 inspects model output for credential shapes, registered app secrets, PII,
@@ -193,9 +201,9 @@ exactly like no protection.* Hence banners + heartbeats + central status.
 
 ## pending / immediate next steps
 
-1. **Consumers need a rebuild for v1.6.0** — bulwork / voicelogger-cli
+1. **Consumers need a rebuild for v1.7.0** — bulwork / voicelogger-cli
    (`npm install` + build), group-chat (`shield-sync.sh`), wearabLLM (live
-   import, nothing to do). `shield status` flags anything still on 1.5.x.
+   import, nothing to do). `shield status` flags anything still on an older version.
    Once rebuilt, pass a `createShield({...})` instance with each app's
    `secrets`, `output.allowedHosts` and `toolPolicy` — the defaults scan
    but gate nothing (no policy ⇒ every tool call allowed, no allow-list ⇒
@@ -207,23 +215,49 @@ exactly like no protection.* Hence banners + heartbeats + central status.
 
 ---
 
+## shipped in v1.7.0
+
+- **Semantic detector slot** — `Detector` in `src/detectors.ts` /
+  `python/shield/detectors.py`, passed as `createShield({ detectors: [...] })`.
+  Sync detectors run everywhere including inside the SDK wrappers; async ones
+  (an LLM judge) run in `scanInputAsync` / `scanOutputAsync` and are fired off
+  by `scanOutput`. Async detectors are deliberately *skipped* by the
+  synchronous input scan, with a one-time warning: that scan gates tool calls
+  and a verdict arriving afterwards would be unsound. A detector that throws
+  is isolated, never propagated.
+- **Refusal telemetry** — a `refusal` output category. A refusal that follows
+  a flagged input scores 0.7 (`refusal:<kind>:after-flagged-input`, a probing
+  signal); an unprompted one scores 0.35, below the flag threshold.
+- **Detection benchmark** — `bench/corpus.jsonl` (101 hand-written samples:
+  55 attacks over 9 families, 46 benign of which 20 are attack-shaped) scored
+  by `test/benchmark.test.ts` and `python/tests/test_benchmark.py` against the
+  floors in `bench/baseline.json`. Both languages read the same corpus, so
+  they cannot drift apart without one failing. Current measurement:
+  **precision 93.2%, recall 74.5%, F1 82.8%**, identical in TS and Python.
+  `npm run bench` prints the report; `SHIELD_CORPUS=/path` measures against
+  your own corpus; `npm run bench:corpus` regenerates the file.
+
+  The floors are floors, not targets. Recall is deliberately well under 1.0:
+  the corpus includes translated, base64-encoded and purely paraphrased
+  attacks no regex catches, and deleting them to inflate the number is
+  blocked by a corpus-shape test. The way to raise recall is a detector, not
+  a pattern that memorises the corpus. Widening three patterns during this
+  work (stacked qualifiers in `ignore`/`disregard`, a looser noun phrase in
+  `exfil-send-to`) took recall from 65.5% to 74.5% with no new false
+  positives.
+
+---
+
 ## outstanding (from the September review, not yet done)
 
-- **Semantic detector slot** — a pluggable `Detector` interface behind
-  `scanInput` / `scanOutput` so an app can add a cheap classifier or an
-  LLM-judge call (off by default). The regex layer is a tripwire;
-  paraphrase and translation still evade it.
-- **Detection benchmark** — precision/recall of the regex layer against a
-  public injection corpus plus a benign chat corpus, run in CI and failed
-  on regression. Until this exists the weights are tuned by hand.
-- **Refusal telemetry** — an output detector for "the model says it was
-  asked to do something it refused"; useful as a probing signal.
 - **Per-tool argument schemas** — `ToolPolicy` matches arguments by regex;
   a per-tool JSON-schema (or validator fn) would be stronger for
   path/URL/shell arguments.
-- **Streaming tool-call enforcement** — blocked calls are only stripped
-  from non-streaming responses; on helper streams they are logged
-  (`tool_call_gated`) but the caller still sees them.
+- **Raw-stream tool calls are never evaluated** — the larger half of this
+  gap. On the helper streams a blocked call is logged (`tool_call_gated`)
+  but still reaches the caller; in a raw `create({ stream: true })` stream
+  the tool call is not extracted at all, so the policy never runs on it.
+  Stripping is the smaller fix; evaluating raw streams is the real one.
 - **Anthropic `document` blocks** are scanned but not wrapped; PDF/base64
   sources aren't inspected at all.
 - **Split entry points / publish** — `/node`, `/react`, `/anthropic`,
