@@ -1,5 +1,7 @@
 node_modules/
 dist/
+package-lock.json
+pnpm-debug.log*
 *.js.map
 .DS_Store
 __pycache__/

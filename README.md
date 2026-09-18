@@ -192,7 +192,7 @@ reported and dropped; it never takes the scan down with it.
 Python is the same shape: `Detector(name=..., scan=fn, sides=("input",))` and
 `create_shield(detectors=[...])`, with `scan_input_async` / `scan_output_async`.
 
-### How good is the detection? `npm run bench`
+### How good is the detection? `pnpm bench`
 
 Measured, not asserted. `bench/corpus.jsonl` holds 101 hand-written samples —
 55 attacks across nine families, 46 benign of which 20 are deliberately
@@ -212,9 +212,9 @@ corpus-shape test blocks "improving" the score by deleting them. **Raise
 recall with a detector, not with a pattern that memorises the corpus.**
 
 ```bash
-npm run bench                            # the report, with per-family misses
-npm run bench:corpus                     # regenerate corpus.jsonl after editing
-SHIELD_CORPUS=/path/to.jsonl npm run bench   # measure against your own corpus
+pnpm bench                            # the report, with per-family misses
+pnpm bench:corpus                     # regenerate corpus.jsonl after editing
+SHIELD_CORPUS=/path/to.jsonl pnpm bench   # measure against your own corpus
 cd python && python3 -m unittest tests.test_benchmark -v
 ```
 
@@ -426,7 +426,7 @@ There is no auto-update — that was removed on purpose (see the sync section be
 | Consumer | How it updates |
 |---|---|
 | wearabLLM (sys.path import of `python/`) | Immediately — imports the live source on next run |
-| bulwork, voicelogger-cli (`file:../shield`) | `npm install` (or `npm update prompt-shield`) + rebuild |
+| bulwork, voicelogger-cli (`file:../shield`) | `pnpm install` (or `pnpm update prompt-shield`) + rebuild |
 | group-chat (vendored copy) | `~/Projects/shield-sync.sh` (test-gated, review-first) |
 
 ## Tests
@@ -434,18 +434,20 @@ There is no auto-update — that was removed on purpose (see the sync section be
 Both packages have zero-dependency test suites (Node's built-in runner / Python's `unittest`) covering the attack corpus, benign false-positive checks, tag-breakout attempts, canary behavior, the detector API, streamed tool calls, argument schemas, and the detection benchmark (146 TypeScript tests, 126 Python):
 
 ```bash
+This repo uses **pnpm** (`pnpm install`). Published consumers still `npm install prompt-shield`.
+
 # TypeScript (runs in CI on every push)
-npm test
+pnpm test
 
 # Python (also runs in CI)
 cd python && python3 -m unittest discover -s tests -v
 
 # Lint and type-check (both also run in CI)
-npm run lint
+pnpm lint
 cd python && ruff check shield && mypy shield
 ```
 
-When adding a detection pattern or changing wrapping/hardening behavior, change **both** packages and both test suites — they are kept in feature parity by hand, and CI fails if `package.json`, `pyproject.toml`, and the two `SHIELD_VERSION` constants disagree (`npm run check:versions`). Both live in this repo (TypeScript at the root, Python under `python/`) so one commit covers both sides.
+When adding a detection pattern or changing wrapping/hardening behavior, change **both** packages and both test suites — they are kept in feature parity by hand, and CI fails if `package.json`, `pyproject.toml`, and the two `SHIELD_VERSION` constants disagree (`pnpm check:versions`). Both live in this repo (TypeScript at the root, Python under `python/`) so one commit covers both sides.
 
 ## Event log
 

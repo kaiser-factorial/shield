@@ -1,0 +1,3 @@
+# Single-package repo. pnpm 11 stores allowBuilds here, not package.json.
+allowBuilds:
+  esbuild: true

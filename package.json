@@ -50,7 +50,7 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
-    "test": "tsc && node --test dist/test/*.test.js && npm run check:versions",
+    "test": "tsc && node --test dist/test/*.test.js && pnpm run check:versions",
     "logs": "node dist/bin/shield-cli.js logs",
     "scan": "node dist/bin/shield-cli.js scan",
     "check:versions": "node scripts/check-versions.mjs",
@@ -85,6 +85,7 @@
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.70.0"
   },
+  "packageManager": "pnpm@11.7.0",
   "engines": {
     "node": ">=20"
   },

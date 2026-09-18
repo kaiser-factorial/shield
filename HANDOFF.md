@@ -1,5 +1,12 @@
 # shield handoff
 
+## Package manager: pnpm (2026-09-18)
+
+This repo uses **pnpm**, not npm. `pnpm install` / `pnpm test` / `pnpm lint`. Lockfile is `pnpm-lock.yaml`; `package-lock.json` is gitignored. `pnpm-workspace.yaml` is **not** a monorepo — it only holds `allowBuilds`.
+
+Published install for other people stays `npm install prompt-shield` (the registry). Local `file:../shield` consumers (bulwork, voicelogger-cli) are pnpm too. See `AGENTS.md`.
+
+
 **State as of 2026-09-11:** v1.9.0. Every code item from the September review
 has shipped, and both packages are renamed and release-ready as
 **`prompt-shield`**. Nothing is published yet — `RELEASING.md` has the
@@ -216,8 +223,8 @@ the same floor on Python 3.10 and 3.12; and the cross-language version check.
 
 | app | link | update path |
 |---|---|---|
-| bulwork | `file:../shield` | `npm install` + `npm run build` |
-| voicelogger-cli (`ledger_root/`) | `file:../../shield` | `npm install` (runs via tsx, no build) |
+| bulwork | `file:../shield` | `pnpm install` + `pnpm build` |
+| voicelogger-cli (`ledger_root/`) | `file:../shield` | `pnpm install` (runs via tsx, no build) |
 | group-chat | vendored `packages/shield/` | `~/Projects/shield-sync.sh` |
 | wearabLLM v1 (`bridge.py`) | `sys.path` insert → `../../../shield/python` | imports live source — updates instantly |
 
